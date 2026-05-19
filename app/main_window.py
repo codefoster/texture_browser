@@ -12,7 +12,6 @@ from PySide6.QtCore import QThreadPool, Qt, QTimer
 from PySide6.QtGui import QIcon, QImageReader
 from PySide6.QtWidgets import (
     QApplication,
-    QCheckBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -120,10 +119,13 @@ class MainWindow(QMainWindow):
             button.clicked.connect(lambda checked=False, chosen=size: self.set_thumbnail_size(chosen))
             self.size_buttons[size] = button
             size_bar.addWidget(button)
-        self.fbx_checkbox = QCheckBox("FBX")
-        self.fbx_checkbox.toggled.connect(lambda _checked: self.apply_filter(self.search_box.text()))
+        self.extension_filter_box = QLineEdit()
+        self.extension_filter_box.setPlaceholderText(".fbx")
+        self.extension_filter_box.setMaximumWidth(120)
+        self.extension_filter_box.textChanged.connect(lambda _text: self.apply_filter(self.search_box.text()))
         size_bar.addSpacing(18)
-        size_bar.addWidget(self.fbx_checkbox)
+        size_bar.addWidget(QLabel("Extension"))
+        size_bar.addWidget(self.extension_filter_box)
         self.naming_convention_box = QLineEdit()
         self.naming_convention_box.setPlaceholderText("metallic, albedo, roughness, normal")
         self.naming_convention_box.setMinimumWidth(280)
@@ -345,7 +347,7 @@ class MainWindow(QMainWindow):
         self.settings.save_naming_convention(text)
 
     def apply_filter(self, text: str) -> None:
-        self.grid.apply_filter(text, self.fbx_checkbox.isChecked())
+        self.grid.apply_filter(text, self.extension_filter_box.text())
         self.request_visible_thumbnails()
         self.update_selected_info()
         self.status_bar.showMessage(f"Found {self.grid.visible_count()} items")

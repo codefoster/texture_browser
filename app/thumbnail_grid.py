@@ -39,7 +39,7 @@ class ThumbnailGrid(QListWidget):
         self._added_count = 0
         self._filter_query = ""
         self._filter_terms: list[str] = []
-        self._fbx_only = False
+        self._extension_filters: set[str] = set()
         self._visible_count = 0
         self._visible_timer = QTimer(self)
         self._visible_timer.setSingleShot(True)
@@ -53,7 +53,7 @@ class ThumbnailGrid(QListWidget):
         self.setViewMode(QListWidget.IconMode)
         self.setResizeMode(QListWidget.Adjust)
         self.setMovement(QListWidget.Static)
-        self.setSpacing(12)
+        self.setSpacing(8)
         self.setUniformItemSizes(True)
         self.setWordWrap(True)
         self.setAcceptDrops(True)
@@ -108,11 +108,11 @@ class ThumbnailGrid(QListWidget):
         self._added_count = 0
         self._visible_count = 0
 
-    def apply_filter(self, text: str, fbx_only: bool = False) -> None:
+    def apply_filter(self, text: str, extension_filter: str = "") -> None:
         query = text.strip().lower()
         self._filter_query = query
         self._filter_terms = [term.strip() for term in query.split(",") if term.strip()]
-        self._fbx_only = fbx_only
+        self._extension_filters = self._parse_extension_filters(extension_filter)
         visible_count = 0
         for row in range(self.count()):
             item = self.item(row)
@@ -154,7 +154,7 @@ class ThumbnailGrid(QListWidget):
 
     def _apply_size(self) -> None:
         self.setIconSize(QSize(self._thumb_size, self._thumb_size))
-        self.setGridSize(QSize(self._thumb_size + 56, self._thumb_size + 62))
+        self.setGridSize(QSize(max(128, self._thumb_size + 24), self._thumb_size + 54))
 
     def schedule_visible_refresh(self) -> None:
         self._visible_timer.start()
@@ -332,4 +332,19 @@ class ThumbnailGrid(QListWidget):
 
     def _is_hidden_by_filter(self, media_item: MediaItem) -> bool:
         missing_required_term = any(term not in media_item.search_text for term in self._filter_terms)
-        return missing_required_term or (self._fbx_only and media_item.extension != ".fbx")
+        if self._extension_filters:
+            extension_hidden = media_item.extension not in self._extension_filters
+        else:
+            extension_hidden = media_item.is_video or media_item.is_model
+        return missing_required_term or extension_hidden
+
+    def _parse_extension_filters(self, text: str) -> set[str]:
+        extensions: set[str] = set()
+        for raw_part in text.lower().replace(",", " ").replace(";", " ").split():
+            extension = raw_part.strip()
+            if not extension:
+                continue
+            if not extension.startswith("."):
+                extension = f".{extension}"
+            extensions.add(extension)
+        return extensions

@@ -4,7 +4,6 @@ import hashlib
 import os
 import shutil
 import subprocess
-import tempfile
 from pathlib import Path
 
 from PySide6.QtCore import QStandardPaths
@@ -166,116 +165,11 @@ def open_video_in_vlc(path: Path) -> bool:
     return True
 
 
-def find_blender_executable() -> Path | None:
-    path = shutil.which("blender")
-    if path:
-        return Path(path)
-
-    roots = [
-        Path(os.environ.get("ProgramFiles", "")) / "Blender Foundation",
-        Path(os.environ.get("ProgramFiles(x86)", "")) / "Blender Foundation",
-    ]
-    candidates: list[Path] = []
-    for root in roots:
-        if not root.exists():
-            continue
-        candidates.extend(root.glob("Blender *\\blender.exe"))
-    candidates.sort(reverse=True)
-    return candidates[0] if candidates else None
-
-
 def open_fbx_in_viewer(path: Path) -> str | None:
-    blender = find_blender_executable()
-    if blender is not None:
-        resolved_path = str(path.resolve())
-        log_path = Path(tempfile.gettempdir()) / "texture_browser_blender_fbx.log"
-        script = f"""
-import os
-import sys
-import traceback
-from pathlib import Path
-
-import bpy
-
-fbx_path = {resolved_path!r}
-log_path = {str(log_path)!r}
-
-
-def log(message):
-    with open(log_path, "a", encoding="utf-8") as handle:
-        handle.write(message + "\\n")
-
-
-try:
-    log("Opening FBX: " + fbx_path)
-    bpy.context.preferences.view.show_splash = False
-
-    bpy.ops.object.select_all(action='SELECT')
-    bpy.ops.object.delete()
-
-    before = set(bpy.context.scene.objects)
-    try:
-        bpy.ops.import_scene.fbx(filepath=fbx_path, use_anim=False, use_image_search=True)
-        log("Imported with import_scene.fbx")
-    except Exception:
-        log("import_scene.fbx failed; trying wm.fbx_import")
-        log(traceback.format_exc())
-        bpy.ops.wm.fbx_import(filepath=fbx_path, use_anim=False)
-        log("Imported with wm.fbx_import")
-
-    imported_objects = [obj for obj in bpy.context.scene.objects if obj not in before]
-    if not imported_objects:
-        imported_objects = list(bpy.context.scene.objects)
-
-    bpy.ops.object.select_all(action='DESELECT')
-    for obj in imported_objects:
-        obj.select_set(True)
-    if imported_objects:
-        bpy.context.view_layer.objects.active = imported_objects[0]
-    log("Imported object count: " + str(len(imported_objects)))
-
-
-    def frame_imported_model():
-        bpy.context.preferences.view.show_splash = False
-        for window in bpy.context.window_manager.windows:
-            screen = window.screen
-            for area in screen.areas:
-                if area.type != 'VIEW_3D':
-                    continue
-                region = next((region for region in area.regions if region.type == 'WINDOW'), None)
-                if region is None:
-                    continue
-                space = next((space for space in area.spaces if space.type == 'VIEW_3D'), None)
-                if space is not None:
-                    space.shading.type = 'MATERIAL'
-                with bpy.context.temp_override(window=window, screen=screen, area=area, region=region):
-                    bpy.ops.view3d.view_selected(use_all_regions=False)
-                log("Framed imported model")
-                return None
-        return 0.25
-
-    bpy.app.timers.register(frame_imported_model, first_interval=0.5)
-except Exception:
-    log("FBX import failed")
-    log(traceback.format_exc())
-    raise
-"""
-        script_file = Path(tempfile.gettempdir()) / "texture_browser_open_fbx.py"
-        script_file.write_text(script, encoding="utf-8")
-        subprocess.Popen(
-            [
-                os.fspath(blender),
-                "--factory-startup",
-                "--python-exit-code",
-                "9",
-                "--python",
-                os.fspath(script_file),
-            ],
-            cwd=os.fspath(path.parent),
-        )
-        return f"Blender ({blender.parent.name})"
-
     if hasattr(os, "startfile"):
-        os.startfile(os.fspath(path))
-        return "the default FBX app"
+        try:
+            os.startfile(os.fspath(path))
+            return "the default FBX app"
+        except OSError:
+            return None
     return None

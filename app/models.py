@@ -23,7 +23,7 @@ THUMBNAIL_DIMENSIONS = {
     ThumbnailSize.TINY: 72,
     ThumbnailSize.SMALL: 112,
     ThumbnailSize.MEDIUM: 160,
-    ThumbnailSize.LARGE: 224,
+    ThumbnailSize.LARGE: 288,
 }
 
 

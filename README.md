@@ -7,7 +7,8 @@ A lightweight Windows-oriented texture and media browser built with Python and P
 - Windows-style folder tree with a persistent favorites section.
 - Recursive media scanning with background workers.
 - Thumbnail grid with Tiny, Small, Medium, and Large sizing.
-- FBX-only filter for model browsing.
+- Extension filter for narrowing results to types like `.fbx`, `.png`, or `.exr`.
+- Default results show images and image sequences; videos and models appear when their extension is typed.
 - Image sequence grouping for names like `smoke_0001.tga` and `wood_diffuse.1001.exr`.
 - Search filtering across name, folder path, extension, and sequence pattern.
 - Disk-based thumbnail cache keyed by file path, size, modified time, and file size.
