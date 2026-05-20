@@ -26,6 +26,25 @@ class FavoritesStore:
             unique.append(resolved)
         self.settings.setValue("favorites", unique)
 
+    def load_favorites_search_enabled(self, favorites: list[Path]) -> list[Path]:
+        if not self.settings.contains("favorites_search_enabled"):
+            return list(favorites)
+        values = self.settings.value("favorites_search_enabled", [], list)
+        enabled = [Path(value) for value in values]
+        valid = {path.resolve() for path in favorites if path.exists()}
+        return [path for path in enabled if path.exists() and path.resolve() in valid]
+
+    def save_favorites_search_enabled(self, favorites: list[Path]) -> None:
+        unique = []
+        seen = set()
+        for path in favorites:
+            resolved = str(path)
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            unique.append(resolved)
+        self.settings.setValue("favorites_search_enabled", unique)
+
     def load_last_root(self) -> Path | None:
         value = self.settings.value("last_root", "", str)
         if not value:

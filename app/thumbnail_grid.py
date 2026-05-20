@@ -42,6 +42,7 @@ class ThumbnailGrid(QListWidget):
         self._filter_query = ""
         self._filter_terms: list[str] = []
         self._extension_filters: set[str] = set()
+        self._extra_filter = None
         self._visible_count = 0
         self._visible_timer = QTimer(self)
         self._visible_timer.setSingleShot(True)
@@ -116,11 +117,12 @@ class ThumbnailGrid(QListWidget):
         self._added_count = 0
         self._visible_count = 0
 
-    def apply_filter(self, text: str, extension_filter: str = "") -> None:
+    def apply_filter(self, text: str, extension_filter: str = "", extra_filter=None) -> None:
         query = text.strip().lower()
         self._filter_query = query
         self._filter_terms = [term.strip() for term in query.split(",") if term.strip()]
         self._extension_filters = self._parse_extension_filters(extension_filter)
+        self._extra_filter = extra_filter
         visible_count = 0
         for row in range(self.count()):
             item = self.item(row)
@@ -368,7 +370,8 @@ class ThumbnailGrid(QListWidget):
             extension_hidden = media_item.extension not in self._extension_filters
         else:
             extension_hidden = media_item.is_video or media_item.is_model
-        return missing_required_term or extension_hidden
+        extra_hidden = self._extra_filter is not None and not self._extra_filter(media_item)
+        return missing_required_term or extension_hidden or extra_hidden
 
     def _parse_extension_filters(self, text: str) -> set[str]:
         extensions: set[str] = set()

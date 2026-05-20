@@ -22,6 +22,7 @@ class FolderBrowser(QWidget):
     folderOpenRequested = Signal(Path)
     addFavoriteRequested = Signal(Path)
     removeFavoriteRequested = Signal(Path)
+    favoriteSearchToggled = Signal(Path, bool)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -30,6 +31,7 @@ class FolderBrowser(QWidget):
         self.favorites_list = QListWidget()
         self.favorites_list.setMaximumHeight(scale_px(120, self))
         self.favorites_list.itemDoubleClicked.connect(self._on_favorite_activated)
+        self.favorites_list.itemChanged.connect(self._on_favorite_changed)
 
         favorites_header = QHBoxLayout()
         self.favorites_label = QLabel("Favorites")
@@ -70,12 +72,17 @@ class FolderBrowser(QWidget):
             self.tree.setCurrentIndex(index)
             self.tree.scrollTo(index)
 
-    def set_favorites(self, favorites: list[Path]) -> None:
+    def set_favorites(self, favorites: list[Path], enabled_favorites: set[Path] | None = None) -> None:
+        self.favorites_list.blockSignals(True)
         self.favorites_list.clear()
         for path in favorites:
             item = QListWidgetItem(str(path))
             item.setData(Qt.UserRole, path)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            checked = True if enabled_favorites is None else path in enabled_favorites
+            item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
             self.favorites_list.addItem(item)
+        self.favorites_list.blockSignals(False)
 
     def _on_current_changed(self, current: QModelIndex, _previous: QModelIndex) -> None:
         path = Path(self.model.filePath(current))
@@ -105,3 +112,8 @@ class FolderBrowser(QWidget):
         path = item.data(Qt.UserRole)
         if isinstance(path, Path):
             self.removeFavoriteRequested.emit(path)
+
+    def _on_favorite_changed(self, item: QListWidgetItem) -> None:
+        path = item.data(Qt.UserRole)
+        if isinstance(path, Path):
+            self.favoriteSearchToggled.emit(path, item.checkState() == Qt.Checked)

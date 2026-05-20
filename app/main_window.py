@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QCheckBox,
+    QComboBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -163,6 +164,21 @@ ROLE_SORT_ORDER = [
     "preview",
 ]
 
+IMAGE_SIZE_FILTERS = [
+    ("Any size", None),
+    ("Up to 48 px", 48),
+    ("Up to 64 px", 64),
+    ("Up to 128 px", 128),
+    ("Up to 256 px", 256),
+    ("Up to 512 px", 512),
+    ("Up to 1K", 1024),
+    ("Up to 2K", 2048),
+    ("Up to 4K", 4096),
+    ("Up to 8K", 8192),
+    ("Up to 16K", 16384),
+    ("16K+", "16k+"),
+]
+
 
 def resource_path(relative_path: str) -> Path:
     base_path = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
@@ -202,6 +218,7 @@ class MainWindow(QMainWindow):
         self.current_cache: CacheWorker | None = None
         self.current_favorites_index: FavoritesIndexWorker | None = None
         self.current_root: Path | None = None
+        self._queued_folder: Path | None = None
         self.items = []
         self._folder_items = []
         self._favorite_items = []
@@ -222,6 +239,7 @@ class MainWindow(QMainWindow):
         self.folder_browser.folderOpenRequested.connect(self.open_folder_location)
         self.folder_browser.addFavoriteRequested.connect(self.add_favorite)
         self.folder_browser.removeFavoriteRequested.connect(self.remove_favorite)
+        self.folder_browser.favoriteSearchToggled.connect(self.set_favorite_search_enabled)
 
         self.search_box = QLineEdit()
         self.search_box.setPlaceholderText("Search, or paste a folder/file path and press Enter...")
@@ -263,6 +281,15 @@ class MainWindow(QMainWindow):
         self.extension_label = self._section_label("Extension")
         size_bar.addWidget(self.extension_label)
         size_bar.addWidget(self.extension_filter_box)
+        self.image_size_filter_box = QComboBox()
+        self.image_size_filter_box.setMinimumWidth(scale_px(132, self))
+        for label, value in IMAGE_SIZE_FILTERS:
+            self.image_size_filter_box.addItem(label, value)
+        self.image_size_filter_box.currentIndexChanged.connect(lambda _index: self.apply_filter(self.search_box.text()))
+        size_bar.addSpacing(18)
+        self.image_size_label = self._section_label("Image size")
+        size_bar.addWidget(self.image_size_label)
+        size_bar.addWidget(self.image_size_filter_box)
         self.naming_convention_box = QLineEdit()
         self.naming_convention_box.setPlaceholderText("metallic, albedo, roughness, normal")
         self.naming_convention_box.setMinimumWidth(scale_px(280, self))
@@ -315,7 +342,7 @@ class MainWindow(QMainWindow):
         choose_root = QPushButton("Choose Root Folder")
         choose_root.clicked.connect(self.choose_root_folder)
         cancel_button = QPushButton("Cancel Scan")
-        cancel_button.clicked.connect(self.cancel_scan)
+        cancel_button.clicked.connect(self.cancel_scan_from_ui)
         cache_here_button = QPushButton("Cache Here")
         cache_here_button.clicked.connect(self.cache_current_root)
         toolbar.addWidget(choose_root)
@@ -326,7 +353,10 @@ class MainWindow(QMainWindow):
         self.setStatusBar(self.status_bar)
 
         self.favorites = self.settings.load()
-        self.folder_browser.set_favorites(self.favorites)
+        self.favorite_search_enabled = set(self.settings.load_favorites_search_enabled(self.favorites))
+        if not self.favorite_search_enabled:
+            self.favorite_search_enabled = set(self.favorites)
+        self.folder_browser.set_favorites(self.favorites, self.favorite_search_enabled)
 
         stored_size = self.settings.load_thumbnail_size()
         size_choice = ThumbnailSize(stored_size) if stored_size in {size.value for size in ThumbnailSize} else ThumbnailSize.MEDIUM
@@ -396,6 +426,7 @@ class MainWindow(QMainWindow):
 
         if is_drive_root(path):
             self.current_root = path
+            self._queued_folder = None
             self.cancel_scan()
             self._scan_token += 1
             self._prefetch_timer.stop()
@@ -408,7 +439,15 @@ class MainWindow(QMainWindow):
 
         self.current_root = path
         self.settings.save_last_root(path)
-        self.cancel_scan()
+        if self.current_scan is not None:
+            self._queued_folder = path
+            self.cancel_scan()
+            self.status_bar.showMessage(f"Canceling scan. {path} is queued next...")
+            return
+        self._queued_folder = None
+        self._start_scan(path)
+
+    def _start_scan(self, path: Path) -> None:
         self._prefetch_timer.stop()
         self._reset_thumbnail_queue()
         self._folder_items = []
@@ -435,10 +474,14 @@ class MainWindow(QMainWindow):
     def cancel_scan(self) -> None:
         if self.current_scan is not None:
             self.current_scan.cancel()
-            self.current_scan = None
         if self.current_cache is not None:
             self.current_cache.cancel()
             self.current_cache = None
+
+    def cancel_scan_from_ui(self) -> None:
+        self._queued_folder = None
+        self.cancel_scan()
+        self.status_bar.showMessage("Canceling scan...")
 
     def cache_current_root(self) -> None:
         if self.current_root is None or not self.current_root.exists():
@@ -487,8 +530,21 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage("Scan failed")
 
     def _scan_finished(self, scan_token: int) -> None:
-        if scan_token == self._scan_token:
+        finished_scan = self.current_scan
+        if finished_scan is not None and scan_token == self._scan_token:
             self.current_scan = None
+        elif finished_scan is None:
+            pass
+        else:
+            self.current_scan = None
+
+        if self._queued_folder is not None:
+            next_path = self._queued_folder
+            self._queued_folder = None
+            if next_path.exists():
+                self.current_root = next_path
+                self.settings.save_last_root(next_path)
+                self._start_scan(next_path)
 
     def _cache_finished(self, cached_count: int) -> None:
         self.current_cache = None
@@ -565,11 +621,29 @@ class MainWindow(QMainWindow):
         self._apply_grid_filter(text)
 
     def _apply_grid_filter(self, text: str, show_status: bool = True) -> None:
-        self.grid.apply_filter(text, self.extension_filter_box.text())
+        self.grid.apply_filter(text, self.extension_filter_box.text(), self._size_filter_predicate())
         self.request_visible_thumbnails()
         self.update_selected_info()
         if show_status:
             self.status_bar.showMessage(f"Found {self.grid.visible_count()} items")
+
+    def _size_filter_predicate(self):
+        selected = self.image_size_filter_box.currentData()
+        if selected is None:
+            return None
+
+        def predicate(media_item) -> bool:
+            if media_item.is_video or media_item.is_model:
+                return False
+            dimensions = self._image_dimensions_for_item(media_item)
+            if dimensions is None:
+                return False
+            longest_side = max(dimensions)
+            if selected == "16k+":
+                return longest_side >= 16384
+            return longest_side <= int(selected)
+
+        return predicate
 
     def _favorites_search_toggled(self, checked: bool) -> None:
         if checked:
@@ -584,7 +658,10 @@ class MainWindow(QMainWindow):
         return self.favorites_search_checkbox.isChecked()
 
     def _favorite_signature(self) -> tuple[str, ...]:
-        return tuple(sorted(str(path.resolve()) for path in self.favorites if path.exists()))
+        return tuple(sorted(str(path.resolve()) for path in self._selected_favorites()))
+
+    def _selected_favorites(self) -> list[Path]:
+        return [path for path in self.favorites if path in self.favorite_search_enabled and path.exists()]
 
     def _ensure_favorites_items(self) -> bool:
         if not self.favorites:
@@ -593,6 +670,13 @@ class MainWindow(QMainWindow):
             self._favorite_index_signature = ()
             self._show_items([])
             self.status_bar.showMessage("Add folders to Favorites first.")
+            return True
+        if not self._selected_favorites():
+            self._favorite_items = []
+            self._favorite_index_ready = True
+            self._favorite_index_signature = ()
+            self._show_items([])
+            self.status_bar.showMessage("Check at least one favorite to search it.")
             return True
 
         signature = self._favorite_signature()
@@ -605,7 +689,7 @@ class MainWindow(QMainWindow):
             self.status_bar.showMessage("Loading favorites index...")
             return False
 
-        worker = FavoritesIndexWorker([path for path in self.favorites if path.exists()], self.favorites_index_store)
+        worker = FavoritesIndexWorker(self._selected_favorites(), self.favorites_index_store)
         worker.signals.progress.connect(self.status_bar.showMessage)
         worker.signals.finished.connect(
             lambda items, root_count, worker_signature=signature: self._favorites_index_finished(
@@ -705,6 +789,23 @@ class MainWindow(QMainWindow):
 
         self.info_label.setText(f"{item.display_name}    " + "    |    ".join(info_parts))
 
+    def _image_dimensions_for_item(self, item) -> tuple[int, int] | None:
+        cached = item.metadata.get("dimensions")
+        if isinstance(cached, str) and "x" in cached:
+            try:
+                width_text, height_text = cached.split("x", 1)
+                return (int(width_text), int(height_text))
+            except ValueError:
+                pass
+
+        reader = QImageReader(str(item.preview_path))
+        size = reader.size()
+        if not size.isValid():
+            return None
+        dimensions = (size.width(), size.height())
+        item.metadata["dimensions"] = f"{dimensions[0]}x{dimensions[1]}"
+        return dimensions
+
     def _image_dimensions_label(self, path: Path) -> str:
         reader = QImageReader(str(path))
         size = reader.size()
@@ -740,19 +841,34 @@ class MainWindow(QMainWindow):
         if path not in self.favorites:
             self.favorites.append(path)
             self.settings.save(self.favorites)
-            self.folder_browser.set_favorites(self.favorites)
+            self.favorite_search_enabled.add(path)
+            self.settings.save_favorites_search_enabled(list(self.favorite_search_enabled))
+            self.folder_browser.set_favorites(self.favorites, self.favorite_search_enabled)
             self._favorite_index_ready = False
             self._favorite_index_signature = ()
 
     def remove_favorite(self, path: Path) -> None:
         self.favorites = [favorite for favorite in self.favorites if favorite != path]
+        self.favorite_search_enabled.discard(path)
         self.settings.save(self.favorites)
-        self.folder_browser.set_favorites(self.favorites)
+        self.settings.save_favorites_search_enabled(list(self.favorite_search_enabled))
+        self.folder_browser.set_favorites(self.favorites, self.favorite_search_enabled)
         self._favorite_items = [
             item
             for item in self._favorite_items
             if not (item.folder == path or path in item.folder.parents)
         ]
+        self._favorite_index_ready = False
+        self._favorite_index_signature = ()
+        if self._using_favorites_search():
+            self.apply_filter(self.search_box.text())
+
+    def set_favorite_search_enabled(self, path: Path, enabled: bool) -> None:
+        if enabled:
+            self.favorite_search_enabled.add(path)
+        else:
+            self.favorite_search_enabled.discard(path)
+        self.settings.save_favorites_search_enabled(list(self.favorite_search_enabled))
         self._favorite_index_ready = False
         self._favorite_index_signature = ()
         if self._using_favorites_search():
