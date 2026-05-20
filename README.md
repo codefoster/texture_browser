@@ -12,6 +12,7 @@ A lightweight Windows-oriented texture and media browser built with Python and P
 - Image sequence grouping for names like `smoke_0001.tga` and `wood_diffuse.1001.exr`.
 - Search filtering across name, folder path, extension, and sequence pattern.
 - Disk-based thumbnail cache keyed by file path, size, modified time, and file size.
+- Naming convention presets for quickly switching associated-texture matching terms.
 - Context menu actions for opening Explorer, copying the file path, and copying the folder path.
 - Internal image viewer with fit-to-window zoom and frame stepping for sequences.
 - Video double-click handoff to VLC.

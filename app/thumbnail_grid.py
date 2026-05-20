@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 from PySide6.QtCore import QEvent, QMimeData, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QIcon
@@ -26,6 +27,7 @@ class ThumbnailGrid(QListWidget):
     populationProgress = Signal(int, int)
     filesDropped = Signal(list)
     associatedRequested = Signal(MediaItem)
+    guessRequested = Signal(MediaItem)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -56,6 +58,7 @@ class ThumbnailGrid(QListWidget):
         self.setSpacing(8)
         self.setUniformItemSizes(True)
         self.setWordWrap(True)
+        self.setTextElideMode(Qt.ElideNone)
         self.setAcceptDrops(True)
         self.setDragEnabled(True)
         self.setDropIndicatorShown(True)
@@ -74,11 +77,16 @@ class ThumbnailGrid(QListWidget):
         self._thumb_size = size
         self._loaded_paths.clear()
         self._apply_size()
+        size_hint = self._item_size_hint()
         for row in range(self.count()):
             item = self.item(row)
             media_item = item.data(Qt.UserRole)
+            item.setSizeHint(size_hint)
             placeholder = build_placeholder(media_item.extension or "file", self._thumb_size, media_item.is_video)
             item.setIcon(QIcon(placeholder))
+        self.doItemsLayout()
+        self.updateGeometries()
+        self.viewport().update()
         self.schedule_visible_refresh()
 
     def set_items(self, items: list[MediaItem]) -> None:
@@ -153,8 +161,24 @@ class ThumbnailGrid(QListWidget):
         return []
 
     def _apply_size(self) -> None:
+        size_hint = self._item_size_hint()
         self.setIconSize(QSize(self._thumb_size, self._thumb_size))
-        self.setGridSize(QSize(max(128, self._thumb_size + 24), self._thumb_size + 54))
+        self.setGridSize(size_hint)
+
+    def _item_size_hint(self) -> QSize:
+        if self._thumb_size <= 72:
+            text_width = 28
+            text_height = 74
+        elif self._thumb_size <= 112:
+            text_width = 28
+            text_height = 78
+        elif self._thumb_size <= 160:
+            text_width = 32
+            text_height = 84
+        else:
+            text_width = 40
+            text_height = 92
+        return QSize(self._thumb_size + text_width, self._thumb_size + text_height)
 
     def schedule_visible_refresh(self) -> None:
         self._visible_timer.start()
@@ -247,11 +271,13 @@ class ThumbnailGrid(QListWidget):
 
         menu = QMenu(self)
         associated_action = QAction("Select associated", self)
+        guess_action = QAction("Guess", self)
         open_action = QAction("Open file location", self)
         copy_file_action = QAction("Copy file path", self)
         copy_folder_action = QAction("Copy folder path", self)
 
         associated_action.triggered.connect(lambda: self.associatedRequested.emit(media_item))
+        guess_action.triggered.connect(lambda: self.guessRequested.emit(media_item))
         open_action.triggered.connect(lambda: open_in_explorer(media_item.preview_path))
         copy_file_action.triggered.connect(
             lambda: QApplication.clipboard().setText(str(media_item.preview_path))
@@ -261,6 +287,7 @@ class ThumbnailGrid(QListWidget):
         )
 
         menu.addAction(associated_action)
+        menu.addAction(guess_action)
         menu.addSeparator()
         menu.addAction(open_action)
         menu.addAction(copy_file_action)
@@ -281,8 +308,10 @@ class ThumbnailGrid(QListWidget):
 
         for media_item in batch:
             widget_item = QListWidgetItem()
-            widget_item.setText(f"{media_item.display_name}\n{format_type_label(media_item)}")
+            widget_item.setText(self._display_label(media_item.display_name))
             widget_item.setData(Qt.UserRole, media_item)
+            widget_item.setToolTip(f"{media_item.display_name}\n{format_type_label(media_item)}")
+            widget_item.setSizeHint(self._item_size_hint())
             placeholder = build_placeholder(media_item.extension or "file", self._thumb_size, media_item.is_video)
             widget_item.setIcon(QIcon(placeholder))
             hidden = self._is_hidden_by_filter(media_item)
@@ -348,3 +377,9 @@ class ThumbnailGrid(QListWidget):
                 extension = f".{extension}"
             extensions.add(extension)
         return extensions
+
+    def _display_label(self, name: str) -> str:
+        text = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", name)
+        text = text.replace("_", "_ ").replace("-", "- ")
+        text = re.sub(r"\s+", " ", text).strip()
+        return text

@@ -18,9 +18,11 @@ class AssociatedBrowserDialog(QDialog):
         current_index: int,
         thumbnail_size: int,
         parent: QWidget | None = None,
+        window_title: str = "Associated Textures",
+        count_label: str = "associated texture(s)",
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Associated Textures")
+        self.setWindowTitle(window_title)
         self.resize(920, 620)
 
         self.items = items
@@ -31,7 +33,7 @@ class AssociatedBrowserDialog(QDialog):
         self._thumb_jobs: set[tuple[str, int]] = set()
         self._selection_applied = False
 
-        self.title_label = QLabel(f"{len(items)} associated texture(s)")
+        self.title_label = QLabel(f"{len(items)} {count_label}")
         self.grid = ThumbnailGrid()
         self.grid.set_thumbnail_size(thumbnail_size)
         self.grid.itemActivated.connect(self.open_viewer)

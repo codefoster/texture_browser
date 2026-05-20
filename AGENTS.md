@@ -43,6 +43,7 @@ pyinstaller TextureBrowser_Fixes.spec
 - `app/sequence_detector.py`: image sequence grouping for names with 3-6 digit frame numbers.
 - `app/viewer.py`: internal viewer for images and sequences, including frame stepping and zoom.
 - `app/associated_browser.py`: dialog for related texture variants based on naming convention/search terms.
+- `app/naming_presets.py`: dialog for saving, editing, deleting, and loading naming convention presets.
 - `app/favorites.py`: QSettings persistence for favorites, last root, thumbnail size, and naming convention.
 - `app/utils.py`: extension sets, cache paths, Explorer/VLC/default-app handoff helpers.
 - `app/models.py`: dataclasses/enums shared across the app.
@@ -52,6 +53,7 @@ pyinstaller TextureBrowser_Fixes.spec
 
 - The UI is Qt/PySide6 using the Fusion style.
 - Favorites and preferences are stored with `QSettings("TextureBrowser", "TextureBrowser")`.
+- Naming convention presets are stored with the same QSettings profile as a JSON string.
 - Thumbnail cache files are stored under Qt's app data location in `thumb_cache`.
 - Scanning is cooperative and cancelable; the scan worker checks cancellation during directory walking.
 - Drive roots are intentionally not scanned directly; the UI asks the user to choose a folder under the drive.

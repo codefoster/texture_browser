@@ -31,7 +31,9 @@ class FolderBrowser(QWidget):
         self.favorites_list.itemDoubleClicked.connect(self._on_favorite_activated)
 
         favorites_header = QHBoxLayout()
-        favorites_header.addWidget(QLabel("Favorites"))
+        self.favorites_label = QLabel("Favorites")
+        self.favorites_label.setStyleSheet("QLabel { color: #5ea7ff; font-weight: 600; }")
+        favorites_header.addWidget(self.favorites_label)
         self.add_favorite_button = QPushButton("Add")
         self.remove_favorite_button = QPushButton("Remove")
         self.add_favorite_button.clicked.connect(self._emit_add_favorite)

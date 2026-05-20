@@ -7,7 +7,7 @@ from PySide6.QtCore import QObject, QRunnable, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap
 
 from app.models import MediaItem
-from app.utils import cache_dir, cache_key
+from app.utils import cache_dir, cache_key, ensure_library_cache, find_library_cache_dir
 
 try:
     from PIL import Image, ImageOps, ImageSequence
@@ -55,12 +55,12 @@ def load_or_create_thumbnail(item: MediaItem, size: int, status_callback=None) -
     cache_path = None
 
     try:
-        key = cache_key(source_path)
-        cache_path = cache_dir() / f"{key}_{size}.png"
-        if cache_path.exists():
-            pixmap = QPixmap(str(cache_path))
-            if not pixmap.isNull():
-                return pixmap
+        for candidate in _cache_candidates(source_path, size):
+            if candidate.exists():
+                pixmap = QPixmap(str(candidate))
+                if not pixmap.isNull():
+                    return pixmap
+        cache_path = _preferred_cache_path(source_path, size)
     except OSError:
         cache_path = None
 
@@ -70,6 +70,36 @@ def load_or_create_thumbnail(item: MediaItem, size: int, status_callback=None) -
     if status_callback:
         status_callback(f"Generating thumbnails... {item.display_name}")
     return pixmap
+
+
+def _cache_candidates(source_path: Path, size: int) -> list[Path]:
+    candidates: list[Path] = []
+    library_dir = find_library_cache_dir(source_path)
+    if library_dir is not None:
+        library_root = library_dir.parent.parent
+        library_key = cache_key(source_path, library_root)
+        candidates.append(library_dir / f"{library_key}_{size}.png")
+
+    global_key = cache_key(source_path)
+    candidates.append(cache_dir() / f"{global_key}_{size}.png")
+    return candidates
+
+
+def _preferred_cache_path(source_path: Path, size: int) -> Path:
+    library_dir = find_library_cache_dir(source_path)
+    if library_dir is not None:
+        library_root = library_dir.parent.parent
+        library_key = cache_key(source_path, library_root)
+        return library_dir / f"{library_key}_{size}.png"
+
+    parent_cache_dir = source_path.parent / ".texturebrowser-cache"
+    if parent_cache_dir.exists():
+        library_dir = ensure_library_cache(source_path.parent)
+        library_key = cache_key(source_path, source_path.parent)
+        return library_dir / f"{library_key}_{size}.png"
+
+    global_key = cache_key(source_path)
+    return cache_dir() / f"{global_key}_{size}.png"
 
 
 def _generate_thumbnail(item: MediaItem, size: int) -> QPixmap:

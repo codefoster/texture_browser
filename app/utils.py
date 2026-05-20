@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import os
 import shutil
@@ -36,6 +37,8 @@ MODEL_EXTENSIONS = {
     ".fbx",
 }
 
+LIBRARY_CACHE_DIRNAME = ".texturebrowser-cache"
+
 
 def app_data_dir() -> Path:
     base = QStandardPaths.writableLocation(QStandardPaths.AppDataLocation)
@@ -48,6 +51,27 @@ def cache_dir() -> Path:
     path = app_data_dir() / "thumb_cache"
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def library_cache_dir(root: Path) -> Path:
+    return root / LIBRARY_CACHE_DIRNAME / "thumbs"
+
+
+def ensure_library_cache(root: Path) -> Path:
+    cache_root = root / LIBRARY_CACHE_DIRNAME
+    thumbs_dir = cache_root / "thumbs"
+    thumbs_dir.mkdir(parents=True, exist_ok=True)
+    _hide_path_windows(cache_root)
+    return thumbs_dir
+
+
+def find_library_cache_dir(path: Path) -> Path | None:
+    start = path if path.is_dir() else path.parent
+    for parent in [start, *start.parents]:
+        thumbs_dir = parent / LIBRARY_CACHE_DIRNAME / "thumbs"
+        if thumbs_dir.exists():
+            return thumbs_dir
+    return None
 
 
 def normalize_extension(path: Path) -> str:
@@ -72,10 +96,22 @@ def media_kind_for_path(path: Path) -> str:
     return "image"
 
 
-def cache_key(path: Path) -> str:
+def cache_key(path: Path, root: Path | None = None) -> str:
     stat = path.stat()
-    raw = f"{path.resolve()}|{stat.st_mtime_ns}|{stat.st_size}"
+    resolved = path.resolve()
+    if root is not None:
+        try:
+            identifier = resolved.relative_to(root.resolve())
+        except ValueError:
+            identifier = resolved
+    else:
+        identifier = resolved
+    raw = f"{identifier}|{stat.st_mtime_ns}|{stat.st_size}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def is_cache_folder(path: Path) -> bool:
+    return path.name.lower() == LIBRARY_CACHE_DIRNAME.lower()
 
 
 def format_type_label(item: MediaItem) -> str:
@@ -173,3 +209,12 @@ def open_fbx_in_viewer(path: Path) -> str | None:
         except OSError:
             return None
     return None
+
+
+def _hide_path_windows(path: Path) -> None:
+    if os.name != "nt":
+        return
+    try:
+        ctypes.windll.kernel32.SetFileAttributesW(str(path), 0x02)
+    except (AttributeError, OSError):
+        pass

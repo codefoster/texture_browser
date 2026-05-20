@@ -11,6 +11,7 @@ from pathlib import Path
 from PySide6.QtCore import QThreadPool, Qt, QTimer
 from PySide6.QtGui import QIcon, QImageReader
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QFileDialog,
     QHBoxLayout,
@@ -27,9 +28,11 @@ from PySide6.QtWidgets import (
 )
 
 from app.associated_browser import AssociatedBrowserDialog
+from app.cache_worker import CacheWorker
 from app.favorites import FavoritesStore
 from app.folder_tree import FolderBrowser
 from app.models import THUMBNAIL_DIMENSIONS, ThumbnailSize
+from app.naming_presets import NamingPresetDialog
 from app.scanner import ScanWorker
 from app.thumbnail_grid import ThumbnailGrid
 from app.thumbnailer import ThumbnailWorker
@@ -44,6 +47,118 @@ from app.viewer import ViewerWindow
 
 
 APP_USER_MODEL_ID = "TextureBrowser.TextureBrowser"
+TEXTURE_ROLE_TERMS = {
+    "albedo",
+    "alpha",
+    "ambient",
+    "ao",
+    "arm",
+    "base",
+    "basecolor",
+    "basecolour",
+    "bump",
+    "cavity",
+    "col",
+    "color",
+    "colour",
+    "curvature",
+    "diff",
+    "diffuse",
+    "disp",
+    "displacement",
+    "emission",
+    "emissive",
+    "emit",
+    "gloss",
+    "glossiness",
+    "height",
+    "mask",
+    "metal",
+    "metallic",
+    "metalness",
+    "met",
+    "mra",
+    "mro",
+    "mtl",
+    "n",
+    "nor",
+    "norm",
+    "normal",
+    "nrm",
+    "occ",
+    "occl",
+    "occlusion",
+    "opacity",
+    "orm",
+    "packed",
+    "refl",
+    "reflect",
+    "reflection",
+    "reflectivity",
+    "rough",
+    "roughness",
+    "rgh",
+    "rma",
+    "spec",
+    "specular",
+    "trans",
+    "transparency",
+    "directx",
+    "dx",
+    "gl",
+    "opengl",
+    "unity",
+    "unreal",
+}
+GUESS_NOISE_TERMS = {
+    "1k",
+    "2k",
+    "4k",
+    "8k",
+    "16k",
+    "preview",
+    "surface",
+    "texture",
+    "material",
+    "mat",
+    "map",
+    "t",
+    "tex",
+    "tx",
+}
+ROLE_SORT_ORDER = [
+    "basecolor",
+    "basecolour",
+    "albedo",
+    "diffuse",
+    "color",
+    "colour",
+    "ao",
+    "n",
+    "normal",
+    "norm",
+    "nrm",
+    "bump",
+    "roughness",
+    "rgh",
+    "glossiness",
+    "gloss",
+    "refl",
+    "reflectivity",
+    "mro",
+    "orm",
+    "metallic",
+    "metalness",
+    "met",
+    "height",
+    "displacement",
+    "cavity",
+    "opacity",
+    "alpha",
+    "emissive",
+    "specular",
+    "preview",
+]
 
 
 def resource_path(relative_path: str) -> Path:
@@ -72,16 +187,20 @@ class MainWindow(QMainWindow):
 
         self.scan_pool = QThreadPool(self)
         self.scan_pool.setMaxThreadCount(1)
+        self.cache_pool = QThreadPool(self)
+        self.cache_pool.setMaxThreadCount(1)
         self.thumbnail_pool = QThreadPool(self)
         self.thumbnail_pool.setMaxThreadCount(4)
         self.settings = FavoritesStore()
         self.current_scan: ScanWorker | None = None
+        self.current_cache: CacheWorker | None = None
         self.current_root: Path | None = None
         self.items = []
         self._thumb_jobs: set[tuple[int, str, int]] = set()
         self._thumbnail_generation = 0
         self._scan_token = 0
         self._scan_found_count = 0
+        self._selection_windows: list[AssociatedBrowserDialog] = []
         self._prefetch_timer = QTimer(self)
         self._prefetch_timer.setSingleShot(True)
         self._prefetch_timer.setInterval(180)
@@ -99,6 +218,8 @@ class MainWindow(QMainWindow):
         self.search_box.returnPressed.connect(self.browse_to_search_path)
         self.browse_path_button = QPushButton("Browse Path")
         self.browse_path_button.clicked.connect(self.browse_to_search_path)
+        self.seek_button = QPushButton("Seek")
+        self.seek_button.clicked.connect(self.seek_selected_item)
 
         self.grid = ThumbnailGrid()
         self.grid.itemActivated.connect(self.open_viewer)
@@ -109,9 +230,11 @@ class MainWindow(QMainWindow):
         self.grid.itemSelectionChanged.connect(self.update_selected_info)
         self.grid.filesDropped.connect(self.import_dropped_files)
         self.grid.associatedRequested.connect(self.open_associated_viewer)
+        self.grid.guessRequested.connect(self.open_guess_viewer)
 
         size_bar = QHBoxLayout()
-        size_bar.addWidget(QLabel("Thumbnails"))
+        self.thumbnails_label = self._section_label("Thumbnails")
+        size_bar.addWidget(self.thumbnails_label)
         self.size_buttons = {}
         for size in ThumbnailSize:
             button = QPushButton(size.value)
@@ -124,15 +247,20 @@ class MainWindow(QMainWindow):
         self.extension_filter_box.setMaximumWidth(120)
         self.extension_filter_box.textChanged.connect(lambda _text: self.apply_filter(self.search_box.text()))
         size_bar.addSpacing(18)
-        size_bar.addWidget(QLabel("Extension"))
+        self.extension_label = self._section_label("Extension")
+        size_bar.addWidget(self.extension_label)
         size_bar.addWidget(self.extension_filter_box)
         self.naming_convention_box = QLineEdit()
         self.naming_convention_box.setPlaceholderText("metallic, albedo, roughness, normal")
         self.naming_convention_box.setMinimumWidth(280)
         self.naming_convention_box.textChanged.connect(self.save_naming_convention)
         size_bar.addSpacing(18)
-        size_bar.addWidget(QLabel("Naming convention"))
+        self.naming_convention_label = self._section_label("Naming convention")
+        size_bar.addWidget(self.naming_convention_label)
         size_bar.addWidget(self.naming_convention_box, 1)
+        self.naming_presets_button = QPushButton("Presets")
+        self.naming_presets_button.clicked.connect(self.open_naming_presets)
+        size_bar.addWidget(self.naming_presets_button)
         size_bar.addStretch(1)
 
         self.info_label = QLabel("Select an item to see file info.")
@@ -148,6 +276,7 @@ class MainWindow(QMainWindow):
         search_row = QHBoxLayout()
         search_row.addWidget(self.search_box, 1)
         search_row.addWidget(self.browse_path_button)
+        search_row.addWidget(self.seek_button)
         right_layout.addLayout(search_row)
         right_layout.addLayout(size_bar)
         right_layout.addWidget(self.info_label)
@@ -172,8 +301,11 @@ class MainWindow(QMainWindow):
         choose_root.clicked.connect(self.choose_root_folder)
         cancel_button = QPushButton("Cancel Scan")
         cancel_button.clicked.connect(self.cancel_scan)
+        cache_here_button = QPushButton("Cache Here")
+        cache_here_button.clicked.connect(self.cache_current_root)
         toolbar.addWidget(choose_root)
         toolbar.addWidget(cancel_button)
+        toolbar.addWidget(cache_here_button)
 
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
@@ -233,6 +365,16 @@ class MainWindow(QMainWindow):
         self.search_box.setText(text)
         self.search_box.blockSignals(False)
 
+    def _set_extension_filter_without_filter(self, text: str) -> None:
+        self.extension_filter_box.blockSignals(True)
+        self.extension_filter_box.setText(text)
+        self.extension_filter_box.blockSignals(False)
+
+    def _section_label(self, text: str) -> QLabel:
+        label = QLabel(text)
+        label.setStyleSheet("QLabel { color: #5ea7ff; font-weight: 600; }")
+        return label
+
     def select_folder(self, path: Path) -> None:
         if not path.exists():
             return
@@ -279,6 +421,28 @@ class MainWindow(QMainWindow):
         if self.current_scan is not None:
             self.current_scan.cancel()
             self.current_scan = None
+        if self.current_cache is not None:
+            self.current_cache.cancel()
+            self.current_cache = None
+
+    def cache_current_root(self) -> None:
+        if self.current_root is None or not self.current_root.exists():
+            self.status_bar.showMessage("Select a folder to cache first.")
+            return
+        if is_drive_root(self.current_root):
+            self.status_bar.showMessage("Select a top folder inside the drive before caching.")
+            return
+        if self.current_cache is not None:
+            self.status_bar.showMessage("Thumbnail caching is already running.")
+            return
+
+        worker = CacheWorker(self.current_root)
+        worker.signals.progress.connect(self.status_bar.showMessage)
+        worker.signals.finished.connect(self._cache_finished)
+        worker.signals.error.connect(self._cache_failed)
+        self.current_cache = worker
+        self.status_bar.showMessage(f"Caching thumbnails in {self.current_root}...")
+        self.cache_pool.start(worker)
 
     def _handle_scan_batch(self, scan_token: int, items: list, found_count: int) -> None:
         if scan_token != self._scan_token:
@@ -307,6 +471,16 @@ class MainWindow(QMainWindow):
     def _scan_finished(self, scan_token: int) -> None:
         if scan_token == self._scan_token:
             self.current_scan = None
+
+    def _cache_finished(self, cached_count: int) -> None:
+        self.current_cache = None
+        self.status_bar.showMessage(f"Cached thumbnails for {cached_count} item(s).")
+        self.request_visible_thumbnails()
+
+    def _cache_failed(self, message: str) -> None:
+        self.current_cache = None
+        QMessageBox.warning(self, "Cache Error", message)
+        self.status_bar.showMessage("Caching thumbnails failed")
 
     def request_thumbnail(self, item) -> None:
         size = THUMBNAIL_DIMENSIONS[self.current_thumbnail_size]
@@ -346,11 +520,46 @@ class MainWindow(QMainWindow):
     def save_naming_convention(self, text: str) -> None:
         self.settings.save_naming_convention(text)
 
+    def open_naming_presets(self) -> None:
+        dialog = NamingPresetDialog(
+            self.settings.load_naming_presets(),
+            self.naming_convention_box.text(),
+            self,
+        )
+        dialog.presetsChanged.connect(self.settings.save_naming_presets)
+        dialog.presetApplied.connect(self.apply_naming_preset)
+        dialog.exec()
+
+    def apply_naming_preset(self, convention: str) -> None:
+        self.naming_convention_box.setText(convention)
+        self.settings.save_naming_convention(convention)
+        self.status_bar.showMessage("Naming convention preset loaded.")
+
     def apply_filter(self, text: str) -> None:
         self.grid.apply_filter(text, self.extension_filter_box.text())
         self.request_visible_thumbnails()
         self.update_selected_info()
         self.status_bar.showMessage(f"Found {self.grid.visible_count()} items")
+
+    def seek_selected_item(self) -> None:
+        current = self.grid.currentItem()
+        if current is None:
+            self.status_bar.showMessage("Select an item to seek.")
+            return
+
+        self._set_search_text_without_filter("")
+        self._set_extension_filter_without_filter("")
+        self.apply_filter("")
+
+        if current.isHidden():
+            self.status_bar.showMessage("Selected item is hidden by the default image view.")
+            return
+
+        self.grid.setCurrentItem(current)
+        self.grid.scrollToItem(current, QAbstractItemView.PositionAtCenter)
+        self.grid.setFocus(Qt.OtherFocusReason)
+        item = current.data(Qt.UserRole)
+        self.status_bar.showMessage(f"Seeked to {item.display_name}.")
 
     def update_selected_info(self) -> None:
         current = self.grid.currentItem()
@@ -525,28 +734,68 @@ class MainWindow(QMainWindow):
                 break
 
         self.status_bar.showMessage(f"Showing {len(associated_items)} associated texture(s).")
-        browser = AssociatedBrowserDialog(
+        self._show_selection_browser(
             associated_items,
+            current_index,
+            "Associated Textures",
+            "associated texture(s)",
+        )
+
+    def open_guess_viewer(self, item) -> None:
+        guessed_items = self._guessed_items_for(item)
+        if not guessed_items:
+            self.status_bar.showMessage("No guessed associates found.")
+            return
+
+        current_index = 0
+        for index, guessed_item in enumerate(guessed_items):
+            if guessed_item.preview_path == item.preview_path and guessed_item.display_name == item.display_name:
+                current_index = index
+                break
+
+        self.status_bar.showMessage(f"Showing {len(guessed_items)} guessed associate(s).")
+        self._show_selection_browser(
+            guessed_items,
+            current_index,
+            "Guessed Associates",
+            "guessed texture(s)",
+        )
+
+    def _show_selection_browser(
+        self,
+        items: list,
+        current_index: int,
+        window_title: str,
+        count_label: str,
+    ) -> None:
+        while len(self._selection_windows) >= 6:
+            oldest = self._selection_windows.pop(0)
+            oldest.close()
+
+        browser = AssociatedBrowserDialog(
+            items,
             current_index,
             THUMBNAIL_DIMENSIONS[self.current_thumbnail_size],
             self,
+            window_title,
+            count_label,
         )
-        browser.exec()
+        browser.setModal(False)
+        browser.setAttribute(Qt.WA_DeleteOnClose, True)
+        browser.finished.connect(lambda _result, dialog=browser: self._forget_selection_window(dialog))
+        self._selection_windows.append(browser)
+        browser.show()
+
+    def _forget_selection_window(self, dialog: AssociatedBrowserDialog) -> None:
+        if dialog in self._selection_windows:
+            self._selection_windows.remove(dialog)
 
     def _associated_items_for(self, item) -> list:
         if item.is_video or item.is_model:
             return []
 
-        convention_terms = self._comma_terms(self.naming_convention_box.text())
-        search_terms = self._search_words(self.search_box.text())
-        source_terms = [
-            term
-            for term in self._unique_terms(search_terms + convention_terms)
-            if term in item.preview_path.stem.lower()
-        ]
-        if not source_terms and convention_terms:
-            source_terms = [term for term in convention_terms if term in item.preview_path.stem.lower()]
-        if not source_terms:
+        convention_terms = self._convention_token_groups(self.naming_convention_box.text())
+        if not convention_terms:
             return [item]
 
         candidates = [
@@ -554,35 +803,190 @@ class MainWindow(QMainWindow):
             for media_item in self.items
             if media_item.folder == item.folder and not media_item.is_video and not media_item.is_model
         ]
+        selected_tokens = self._name_tokens(item.preview_path.stem)
+        selected_has_role = self._candidate_has_convention_role(selected_tokens, convention_terms)
+        seed_candidate = self._guess_seed_candidate(item, candidates, convention_terms)
+        if seed_candidate is None:
+            shared_tokens = self._guess_identity_tokens(item.preview_path.stem, convention_terms)
+        else:
+            shared_tokens = self._shared_guess_tokens(item, seed_candidate, convention_terms)
+        if not shared_tokens:
+            return [item]
 
         matches: dict[tuple[Path, str], object] = {}
-        for source_term in source_terms:
-            variant_terms = self._unique_terms([source_term] + convention_terms)
-            selected_key = self._variant_key(item.preview_path.stem, variant_terms)
-            for candidate in candidates:
-                if candidate.extension != item.extension:
-                    continue
-                if self._variant_key(candidate.preview_path.stem, variant_terms) == selected_key:
-                    matches[(candidate.preview_path, candidate.display_name)] = candidate
+        for candidate in candidates:
+            candidate_tokens = self._name_tokens(candidate.preview_path.stem)
+            if not self._candidate_has_convention_role(candidate_tokens, convention_terms):
+                continue
+            if not self._guess_identity_matches(shared_tokens, candidate, convention_terms):
+                continue
+            matches[(candidate.preview_path, candidate.display_name)] = candidate
 
         if (item.preview_path, item.display_name) not in matches:
             matches[(item.preview_path, item.display_name)] = item
 
-        def sort_key(media_item) -> tuple[int, str]:
-            name = media_item.preview_path.stem.lower()
-            term_order = len(convention_terms) + 1
-            for index, term in enumerate(convention_terms):
-                if term in name:
-                    term_order = index + 1
-                    break
-            if media_item.preview_path == item.preview_path and media_item.display_name == item.display_name:
-                term_order = 0
-            return (term_order, media_item.display_name.lower())
+        return sorted(
+            matches.values(),
+            key=lambda media_item: self._association_sort_key(media_item, item, convention_terms),
+        )
 
-        return sorted(matches.values(), key=sort_key)
+    def _guessed_items_for(self, item) -> list:
+        if item.is_video or item.is_model:
+            return []
+
+        convention_terms = self._convention_token_groups(self.naming_convention_box.text())
+        candidates = [
+            media_item
+            for media_item in self.items
+            if media_item.folder == item.folder and not media_item.is_video and not media_item.is_model
+        ]
+        seed_candidate = self._guess_seed_candidate(item, candidates, convention_terms)
+        if seed_candidate is None:
+            return [item]
+
+        shared_tokens = self._shared_guess_tokens(item, seed_candidate, convention_terms)
+        if not shared_tokens:
+            return [item]
+
+        matches: dict[tuple[Path, str], object] = {}
+        for candidate in candidates:
+            if not self._guess_identity_matches(shared_tokens, candidate, convention_terms):
+                continue
+            matches[(candidate.preview_path, candidate.display_name)] = candidate
+
+        if (item.preview_path, item.display_name) not in matches:
+            matches[(item.preview_path, item.display_name)] = item
+
+        return sorted(
+            matches.values(),
+            key=lambda media_item: self._association_sort_key(media_item, item, convention_terms),
+        )
+
+    def _name_tokens(self, stem: str) -> list[str]:
+        spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", stem)
+        return self._unique_terms(re.findall(r"[a-z0-9]+", spaced.lower()))
+
+    def _association_sort_key(self, media_item, selected_item, convention_terms: list[list[str]]) -> tuple[int, int, str]:
+        if media_item.preview_path == selected_item.preview_path and media_item.display_name == selected_item.display_name:
+            return (0, 0, media_item.display_name.lower())
+
+        tokens = self._name_tokens(media_item.preview_path.stem)
+        selected_tokens = self._name_tokens(selected_item.preview_path.stem)
+        role_order = self._role_sort_order(tokens)
+        selected_role_order = self._role_sort_order(selected_tokens)
+        term_order = len(convention_terms) + 1
+        for index, term_tokens in enumerate(convention_terms):
+            if self._find_token_span(tokens, term_tokens)[0] >= 0:
+                term_order = index + 1
+                break
+        effective_order = role_order if role_order <= len(ROLE_SORT_ORDER) else term_order
+        if role_order == selected_role_order:
+            effective_order += len(ROLE_SORT_ORDER)
+        return (1, effective_order, media_item.display_name.lower())
+
+    def _guess_seed_candidate(self, item, candidates, convention_terms: list[list[str]]):
+        selected_tokens = self._guess_identity_tokens(item.preview_path.stem, convention_terms)
+        if not selected_tokens:
+            return None
+
+        best_candidate = None
+        best_score = 0
+        for candidate in candidates:
+            if candidate.preview_path == item.preview_path and candidate.display_name == item.display_name:
+                continue
+            shared_tokens = self._shared_guess_tokens(item, candidate, convention_terms)
+            if not shared_tokens:
+                continue
+
+            candidate_tokens = self._name_tokens(candidate.preview_path.stem)
+            role_bonus = 2 if self._candidate_has_convention_role(candidate_tokens, convention_terms) else 0
+            score = sum(self._guess_token_weight(token) for token in shared_tokens) + role_bonus
+            if score > best_score:
+                best_score = score
+                best_candidate = candidate
+        return best_candidate
+
+    def _guess_identity_tokens(self, stem: str, convention_terms: list[list[str]] | None = None) -> list[str]:
+        role_terms = set(TEXTURE_ROLE_TERMS)
+        if convention_terms is not None:
+            role_terms.update("".join(term_tokens) for term_tokens in convention_terms)
+            for term_tokens in convention_terms:
+                role_terms.update(term_tokens)
+
+        tokens = []
+        for token in self._name_tokens(stem):
+            normalized = re.sub(r"\d+$", "", token) or token
+            if normalized in role_terms or normalized in GUESS_NOISE_TERMS:
+                continue
+            tokens.append(normalized)
+        return self._unique_terms(tokens)
+
+    def _shared_guess_tokens(self, left_item, right_item, convention_terms: list[list[str]] | None = None) -> list[str]:
+        left_tokens = self._guess_identity_tokens(left_item.preview_path.stem, convention_terms)
+        right_tokens = self._guess_identity_tokens(right_item.preview_path.stem, convention_terms)
+        shared: list[str] = []
+        for left_token in left_tokens:
+            if any(self._guess_tokens_match(left_token, right_token) for right_token in right_tokens):
+                shared.append(left_token)
+        return shared
+
+    def _guess_identity_matches(
+        self,
+        shared_tokens: list[str],
+        candidate,
+        convention_terms: list[list[str]] | None = None,
+    ) -> bool:
+        candidate_tokens = self._guess_identity_tokens(candidate.preview_path.stem, convention_terms)
+        for shared_token in shared_tokens:
+            if not any(self._guess_tokens_match(shared_token, candidate_token) for candidate_token in candidate_tokens):
+                return False
+        return True
+
+    def _guess_token_weight(self, token: str) -> int:
+        if token in {"frame", "sheet", "sheets", "panel", "wall", "floor"}:
+            return 4
+        if token.isdigit():
+            return 6
+        return max(6, min(18, len(token) * 2))
+
+    def _guess_tokens_match(self, left_token: str, right_token: str) -> bool:
+        if left_token == right_token:
+            return True
+        shorter, longer = sorted((left_token, right_token), key=len)
+        return len(shorter) >= 6 and longer.startswith(shorter)
+
+    def _candidate_has_convention_role(self, tokens: list[str], convention_terms: list[list[str]]) -> bool:
+        for term_tokens in convention_terms:
+            if self._find_token_span(tokens, term_tokens)[0] >= 0:
+                return True
+            joined_term = "".join(term_tokens)
+            if any(self._role_token_matches(joined_term, token) for token in tokens):
+                return True
+        return False
+
+    def _role_sort_order(self, tokens: list[str]) -> int:
+        for index, role in enumerate(ROLE_SORT_ORDER, start=1):
+            if any(self._role_token_matches(role, token) for token in tokens):
+                return index
+        return len(ROLE_SORT_ORDER) + 1
 
     def _comma_terms(self, text: str) -> list[str]:
-        return self._unique_terms(term.strip().lower() for term in text.split(",") if term.strip())
+        return self._unique_terms(
+            re.sub(r"[^a-z0-9]+", "", term.lower())
+            for term in text.split(",")
+            if term.strip()
+        )
+
+    def _convention_token_groups(self, text: str) -> list[list[str]]:
+        groups: list[list[str]] = []
+        seen: set[tuple[str, ...]] = set()
+        for term in text.split(","):
+            tokens = tuple(self._name_tokens(term))
+            if not tokens or tokens in seen:
+                continue
+            seen.add(tokens)
+            groups.append(list(tokens))
+        return groups
 
     def _search_words(self, text: str) -> list[str]:
         return self._unique_terms(re.findall(r"[a-z0-9]+", text.lower()))
@@ -597,11 +1001,64 @@ class MainWindow(QMainWindow):
             unique.append(term)
         return unique
 
-    def _variant_key(self, stem: str, variant_terms: list[str]) -> str:
-        key = stem.lower()
-        for term in sorted(variant_terms, key=len, reverse=True):
-            key = key.replace(term, "{texture}")
-        return re.sub(r"[^a-z0-9{}]+", "_", key).strip("_")
+    def _variant_key(self, stem: str, variant_terms: list[list[str]]) -> str | None:
+        tokens = self._name_tokens(stem)
+        if not tokens:
+            return None
+
+        best_key: list[str] | None = None
+        best_match_size = 0
+        for term_tokens in variant_terms:
+            start_index, match_length = self._find_token_span(tokens, term_tokens)
+            if start_index < 0:
+                continue
+
+            key_tokens = tokens[:start_index] + ["{texture}"] + tokens[start_index + match_length :]
+            if len(term_tokens) > best_match_size:
+                best_match_size = len(term_tokens)
+                best_key = key_tokens
+
+        if best_key is None:
+            return None
+        return "_".join(best_key)
+
+    def _variant_search_text(self, stem: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "", stem.lower())
+
+    def _find_subsequence(self, tokens: list[str], pattern: list[str]) -> int:
+        if not tokens or not pattern or len(pattern) > len(tokens):
+            return -1
+        last_start = len(tokens) - len(pattern)
+        for start_index in range(last_start + 1):
+            if tokens[start_index : start_index + len(pattern)] == pattern:
+                return start_index
+        return -1
+
+    def _find_token_span(self, tokens: list[str], pattern: list[str]) -> tuple[int, int]:
+        if not tokens or not pattern:
+            return (-1, 0)
+
+        joined_pattern = "".join(self._normalize_role_token(token) for token in pattern)
+        max_span = min(len(pattern), len(tokens))
+        for start_index in range(len(tokens)):
+            for span_length in range(max_span, 0, -1):
+                end_index = start_index + span_length
+                if end_index > len(tokens):
+                    continue
+                joined_tokens = "".join(
+                    self._normalize_role_token(token) for token in tokens[start_index:end_index]
+                )
+                if joined_tokens == joined_pattern:
+                    return (start_index, span_length)
+        return (-1, 0)
+
+    def _normalize_role_token(self, token: str) -> str:
+        normalized = re.sub(r"[^a-z0-9]+", "", token.lower())
+        stripped = re.sub(r"\d+$", "", normalized)
+        return stripped or normalized
+
+    def _role_token_matches(self, role: str, token: str) -> bool:
+        return self._normalize_role_token(role) == self._normalize_role_token(token)
 
     def _handle_population_progress(self, added_count: int, total_count: int) -> None:
         if self.current_scan is None:

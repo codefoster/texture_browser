@@ -7,7 +7,7 @@ from PySide6.QtCore import QObject, QRunnable, Signal
 
 from app.models import MediaItem
 from app.sequence_detector import build_media_items
-from app.utils import is_supported_media
+from app.utils import is_cache_folder, is_supported_media
 
 
 class ScanWorkerSignals(QObject):
@@ -36,6 +36,7 @@ class ScanWorker(QRunnable):
             for dirpath, _dirnames, filenames in os.walk(
                 self.root, onerror=lambda err: self.signals.progress.emit(f"Skipping: {err.filename}")
             ):
+                _dirnames[:] = [name for name in _dirnames if not is_cache_folder(Path(name))]
                 if self._cancelled:
                     self.signals.progress.emit("Scan canceled")
                     self.signals.result.emit(found)
