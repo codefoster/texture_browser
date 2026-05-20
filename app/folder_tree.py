@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from app.utils import scale_px
 
 
 class FolderBrowser(QWidget):
@@ -27,7 +28,7 @@ class FolderBrowser(QWidget):
         self._current_folder: Path | None = None
 
         self.favorites_list = QListWidget()
-        self.favorites_list.setMaximumHeight(120)
+        self.favorites_list.setMaximumHeight(scale_px(120, self))
         self.favorites_list.itemDoubleClicked.connect(self._on_favorite_activated)
 
         favorites_header = QHBoxLayout()
@@ -49,7 +50,7 @@ class FolderBrowser(QWidget):
         self.tree.setModel(self.model)
         self.tree.setHeaderHidden(True)
         self.tree.setAnimated(True)
-        self.tree.setIndentation(16)
+        self.tree.setIndentation(scale_px(16, self))
         for column in range(1, 4):
             self.tree.hideColumn(column)
         self.tree.selectionModel().currentChanged.connect(self._on_current_changed)

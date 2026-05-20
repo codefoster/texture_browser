@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import ctypes
 import hashlib
+import json
 import os
 import shutil
 import subprocess
+import tempfile
+import threading
 from pathlib import Path
 
 from PySide6.QtCore import QStandardPaths
+from PySide6.QtGui import QGuiApplication
 
 from app.models import MediaItem
 
@@ -38,6 +42,12 @@ MODEL_EXTENSIONS = {
 }
 
 LIBRARY_CACHE_DIRNAME = ".texturebrowser-cache"
+LIBRARY_CACHE_MANIFEST = "index.json"
+BASE_SCREEN_WIDTH = 1920
+BASE_SCREEN_HEIGHT = 1080
+BASE_DPI = 96.0
+
+_manifest_lock = threading.RLock()
 
 
 def app_data_dir() -> Path:
@@ -45,6 +55,33 @@ def app_data_dir() -> Path:
     path = Path(base)
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def ui_scale_factor(widget=None) -> float:
+    screen = None
+    if widget is not None:
+        try:
+            screen = widget.screen()
+        except RuntimeError:
+            screen = None
+    if screen is None:
+        app = QGuiApplication.instance()
+        if app is not None:
+            screen = app.primaryScreen()
+    if screen is None:
+        return 1.0
+
+    geometry = screen.availableGeometry()
+    geometry_factor = min(
+        geometry.width() / BASE_SCREEN_WIDTH,
+        geometry.height() / BASE_SCREEN_HEIGHT,
+    )
+    dpi_factor = screen.logicalDotsPerInch() / BASE_DPI
+    return max(1.0, min(2.0, max(geometry_factor, dpi_factor)))
+
+
+def scale_px(value: int, widget=None, minimum: int = 1) -> int:
+    return max(minimum, int(round(value * ui_scale_factor(widget))))
 
 
 def cache_dir() -> Path:
@@ -57,21 +94,75 @@ def library_cache_dir(root: Path) -> Path:
     return root / LIBRARY_CACHE_DIRNAME / "thumbs"
 
 
+def library_cache_root(root: Path) -> Path:
+    return root / LIBRARY_CACHE_DIRNAME
+
+
+def library_manifest_path(root: Path) -> Path:
+    return library_cache_root(root) / LIBRARY_CACHE_MANIFEST
+
+
 def ensure_library_cache(root: Path) -> Path:
-    cache_root = root / LIBRARY_CACHE_DIRNAME
+    cache_root = library_cache_root(root)
     thumbs_dir = cache_root / "thumbs"
     thumbs_dir.mkdir(parents=True, exist_ok=True)
     _hide_path_windows(cache_root)
     return thumbs_dir
 
 
-def find_library_cache_dir(path: Path) -> Path | None:
+def find_library_cache_root(path: Path) -> Path | None:
     start = path if path.is_dir() else path.parent
     for parent in [start, *start.parents]:
-        thumbs_dir = parent / LIBRARY_CACHE_DIRNAME / "thumbs"
-        if thumbs_dir.exists():
-            return thumbs_dir
+        cache_root = library_cache_root(parent)
+        if cache_root.exists():
+            return parent
     return None
+
+
+def find_library_cache_dir(path: Path) -> Path | None:
+    library_root = find_library_cache_root(path)
+    if library_root is None:
+        return None
+    thumbs_dir = library_cache_dir(library_root)
+    return thumbs_dir if thumbs_dir.exists() else None
+
+
+def load_library_manifest(root: Path) -> dict:
+    manifest_path = library_manifest_path(root)
+    if not manifest_path.exists():
+        return {"version": 1, "entries": {}}
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"version": 1, "entries": {}}
+    if not isinstance(payload, dict):
+        return {"version": 1, "entries": {}}
+    entries = payload.get("entries", {})
+    if not isinstance(entries, dict):
+        entries = {}
+    return {"version": 1, "entries": entries}
+
+
+def save_library_manifest(root: Path, manifest: dict) -> None:
+    manifest_path = library_manifest_path(root)
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": 1,
+        "entries": manifest.get("entries", {}),
+    }
+    with _manifest_lock:
+        temp_fd, temp_name = tempfile.mkstemp(
+            prefix="texturebrowser-manifest-",
+            suffix=".json",
+            dir=str(manifest_path.parent),
+        )
+        try:
+            with os.fdopen(temp_fd, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2, sort_keys=True)
+            os.replace(temp_name, manifest_path)
+        finally:
+            if os.path.exists(temp_name):
+                os.unlink(temp_name)
 
 
 def normalize_extension(path: Path) -> str:

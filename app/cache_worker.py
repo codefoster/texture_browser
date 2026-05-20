@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import os
 from pathlib import Path
 
@@ -7,8 +8,8 @@ from PySide6.QtCore import QObject, QRunnable, Signal
 
 from app.models import THUMBNAIL_DIMENSIONS, MediaItem, ThumbnailSize
 from app.sequence_detector import build_media_items
-from app.thumbnailer import load_or_create_thumbnail
-from app.utils import ensure_library_cache, is_cache_folder, is_supported_media
+from app.thumbnailer import load_or_create_thumbnail, rebuild_library_manifest
+from app.utils import ensure_library_cache, is_cache_folder, is_supported_media, scale_px
 
 
 class CacheWorkerSignals(QObject):
@@ -31,7 +32,8 @@ class CacheWorker(QRunnable):
         try:
             ensure_library_cache(self.root)
             cached = 0
-            size = THUMBNAIL_DIMENSIONS[ThumbnailSize.MEDIUM]
+            size = scale_px(THUMBNAIL_DIMENSIONS[ThumbnailSize.MEDIUM])
+            items_to_cache: list[MediaItem] = []
             for dirpath, dirnames, filenames in os.walk(self.root):
                 if self._cancelled:
                     self.signals.progress.emit("Cache canceled")
@@ -60,10 +62,39 @@ class CacheWorker(QRunnable):
                         return
                     if item.is_model or item.is_video:
                         continue
-                    self._cache_item(item, size)
-                    cached += 1
-                    if cached % 25 == 0:
-                        self.signals.progress.emit(f"Caching medium thumbnails... {cached} items prepared")
+                    items_to_cache.append(item)
+
+            if not items_to_cache:
+                self.signals.finished.emit(0)
+                return
+
+            max_workers = min(8, max(2, os.cpu_count() or 4))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                pending = {
+                    executor.submit(self._cache_item, item, size): item
+                    for item in items_to_cache
+                }
+                while pending:
+                    if self._cancelled:
+                        self.signals.progress.emit("Cache canceled")
+                        for future in pending:
+                            future.cancel()
+                        self.signals.finished.emit(cached)
+                        return
+
+                    done, _ = wait(pending.keys(), timeout=0.1, return_when=FIRST_COMPLETED)
+                    if not done:
+                        continue
+                    for future in done:
+                        future.result()
+                        pending.pop(future, None)
+                        cached += 1
+                        if cached % 50 == 0:
+                            self.signals.progress.emit(
+                                f"Caching medium thumbnails... {cached}/{len(items_to_cache)} items prepared"
+                            )
+
+            rebuild_library_manifest(self.root, items_to_cache, [size])
 
             self.signals.finished.emit(cached)
         except Exception as exc:  # noqa: BLE001

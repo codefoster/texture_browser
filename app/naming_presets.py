@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from app.utils import scale_px
 
 
 class NamingPresetDialog(QDialog):
@@ -27,7 +28,7 @@ class NamingPresetDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Naming Presets")
-        self.resize(620, 360)
+        self.resize(scale_px(620, self), scale_px(360, self))
 
         self.presets = dict(sorted(presets.items(), key=lambda item: item[0].lower()))
         self.current_convention = current_convention

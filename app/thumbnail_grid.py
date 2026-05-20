@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
 
 from app.models import MediaItem
 from app.thumbnailer import build_placeholder
-from app.utils import format_type_label, open_in_explorer
+from app.utils import format_type_label, open_in_explorer, scale_px
 
 
 class ThumbnailGrid(QListWidget):
@@ -55,7 +55,7 @@ class ThumbnailGrid(QListWidget):
         self.setViewMode(QListWidget.IconMode)
         self.setResizeMode(QListWidget.Adjust)
         self.setMovement(QListWidget.Static)
-        self.setSpacing(8)
+        self.setSpacing(scale_px(8, self))
         self.setUniformItemSizes(True)
         self.setWordWrap(True)
         self.setTextElideMode(Qt.ElideNone)
@@ -166,18 +166,21 @@ class ThumbnailGrid(QListWidget):
         self.setGridSize(size_hint)
 
     def _item_size_hint(self) -> QSize:
-        if self._thumb_size <= 72:
-            text_width = 28
-            text_height = 74
-        elif self._thumb_size <= 112:
-            text_width = 28
-            text_height = 78
-        elif self._thumb_size <= 160:
-            text_width = 32
-            text_height = 84
+        tiny_limit = scale_px(72, self)
+        small_limit = scale_px(112, self)
+        medium_limit = scale_px(160, self)
+        if self._thumb_size <= tiny_limit:
+            text_width = scale_px(28, self)
+            text_height = scale_px(74, self)
+        elif self._thumb_size <= small_limit:
+            text_width = scale_px(28, self)
+            text_height = scale_px(78, self)
+        elif self._thumb_size <= medium_limit:
+            text_width = scale_px(32, self)
+            text_height = scale_px(84, self)
         else:
-            text_width = 40
-            text_height = 92
+            text_width = scale_px(40, self)
+            text_height = scale_px(92, self)
         return QSize(self._thumb_size + text_width, self._thumb_size + text_height)
 
     def schedule_visible_refresh(self) -> None:

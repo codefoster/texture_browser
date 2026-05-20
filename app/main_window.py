@@ -9,10 +9,11 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QThreadPool, Qt, QTimer
-from PySide6.QtGui import QIcon, QImageReader
+from PySide6.QtGui import QGuiApplication, QIcon, QImageReader
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QCheckBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -30,6 +31,7 @@ from PySide6.QtWidgets import (
 from app.associated_browser import AssociatedBrowserDialog
 from app.cache_worker import CacheWorker
 from app.favorites import FavoritesStore
+from app.favorites_index import FavoritesIndexStore, FavoritesIndexWorker
 from app.folder_tree import FolderBrowser
 from app.models import THUMBNAIL_DIMENSIONS, ThumbnailSize
 from app.naming_presets import NamingPresetDialog
@@ -42,6 +44,7 @@ from app.utils import (
     open_fbx_in_viewer,
     open_folder_in_explorer,
     open_video_in_vlc,
+    scale_px,
 )
 from app.viewer import ViewerWindow
 
@@ -183,19 +186,27 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Texture Browser")
-        self.resize(1440, 900)
+        self.resize(scale_px(1440, self), scale_px(900, self))
 
         self.scan_pool = QThreadPool(self)
         self.scan_pool.setMaxThreadCount(1)
         self.cache_pool = QThreadPool(self)
         self.cache_pool.setMaxThreadCount(1)
+        self.index_pool = QThreadPool(self)
+        self.index_pool.setMaxThreadCount(1)
         self.thumbnail_pool = QThreadPool(self)
-        self.thumbnail_pool.setMaxThreadCount(4)
+        self.thumbnail_pool.setMaxThreadCount(min(8, max(4, os.cpu_count() or 4)))
         self.settings = FavoritesStore()
+        self.favorites_index_store = FavoritesIndexStore()
         self.current_scan: ScanWorker | None = None
         self.current_cache: CacheWorker | None = None
+        self.current_favorites_index: FavoritesIndexWorker | None = None
         self.current_root: Path | None = None
         self.items = []
+        self._folder_items = []
+        self._favorite_items = []
+        self._favorite_index_signature: tuple[str, ...] = ()
+        self._favorite_index_ready = False
         self._thumb_jobs: set[tuple[int, str, int]] = set()
         self._thumbnail_generation = 0
         self._scan_token = 0
@@ -203,7 +214,7 @@ class MainWindow(QMainWindow):
         self._selection_windows: list[AssociatedBrowserDialog] = []
         self._prefetch_timer = QTimer(self)
         self._prefetch_timer.setSingleShot(True)
-        self._prefetch_timer.setInterval(180)
+        self._prefetch_timer.setInterval(80)
         self._prefetch_timer.timeout.connect(self._request_prefetch_thumbnails)
 
         self.folder_browser = FolderBrowser()
@@ -216,6 +227,8 @@ class MainWindow(QMainWindow):
         self.search_box.setPlaceholderText("Search, or paste a folder/file path and press Enter...")
         self.search_box.textChanged.connect(self.apply_filter)
         self.search_box.returnPressed.connect(self.browse_to_search_path)
+        self.favorites_search_checkbox = QCheckBox("Favorites")
+        self.favorites_search_checkbox.toggled.connect(self._favorites_search_toggled)
         self.browse_path_button = QPushButton("Browse Path")
         self.browse_path_button.clicked.connect(self.browse_to_search_path)
         self.seek_button = QPushButton("Seek")
@@ -244,7 +257,7 @@ class MainWindow(QMainWindow):
             size_bar.addWidget(button)
         self.extension_filter_box = QLineEdit()
         self.extension_filter_box.setPlaceholderText(".fbx")
-        self.extension_filter_box.setMaximumWidth(120)
+        self.extension_filter_box.setMaximumWidth(scale_px(120, self))
         self.extension_filter_box.textChanged.connect(lambda _text: self.apply_filter(self.search_box.text()))
         size_bar.addSpacing(18)
         self.extension_label = self._section_label("Extension")
@@ -252,7 +265,7 @@ class MainWindow(QMainWindow):
         size_bar.addWidget(self.extension_filter_box)
         self.naming_convention_box = QLineEdit()
         self.naming_convention_box.setPlaceholderText("metallic, albedo, roughness, normal")
-        self.naming_convention_box.setMinimumWidth(280)
+        self.naming_convention_box.setMinimumWidth(scale_px(280, self))
         self.naming_convention_box.textChanged.connect(self.save_naming_convention)
         size_bar.addSpacing(18)
         self.naming_convention_label = self._section_label("Naming convention")
@@ -274,6 +287,7 @@ class MainWindow(QMainWindow):
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
         search_row = QHBoxLayout()
+        search_row.addWidget(self.favorites_search_checkbox)
         search_row.addWidget(self.search_box, 1)
         search_row.addWidget(self.browse_path_button)
         search_row.addWidget(self.seek_button)
@@ -286,11 +300,12 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self.folder_browser)
         splitter.addWidget(right_panel)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([340, 1100])
+        splitter.setSizes([scale_px(340, self), scale_px(1100, self)])
 
         container = QWidget()
         layout = QVBoxLayout(container)
-        layout.setContentsMargins(8, 8, 8, 8)
+        margin = scale_px(8, self)
+        layout.setContentsMargins(margin, margin, margin, margin)
         layout.addWidget(splitter)
         self.setCentralWidget(container)
 
@@ -385,9 +400,9 @@ class MainWindow(QMainWindow):
             self._scan_token += 1
             self._prefetch_timer.stop()
             self._reset_thumbnail_queue()
-            self.items = []
-            self.grid.reset_grid_state()
-            self.update_selected_info()
+            self._folder_items = []
+            if not self._using_favorites_search():
+                self._show_items([])
             self.status_bar.showMessage(f"Select a folder inside {path} to scan. Drive roots are skipped.")
             return
 
@@ -396,10 +411,10 @@ class MainWindow(QMainWindow):
         self.cancel_scan()
         self._prefetch_timer.stop()
         self._reset_thumbnail_queue()
-        self.items = []
+        self._folder_items = []
 
-        self.grid.reset_grid_state()
-        self.update_selected_info()
+        if not self._using_favorites_search():
+            self._show_items([])
         self.status_bar.showMessage(f"Scanning {path}...")
         self._scan_token += 1
         self._scan_found_count = 0
@@ -447,18 +462,21 @@ class MainWindow(QMainWindow):
     def _handle_scan_batch(self, scan_token: int, items: list, found_count: int) -> None:
         if scan_token != self._scan_token:
             return
-        if not self.items:
-            self.grid.reset_grid_state()
-        self.items.extend(items)
+        self._folder_items.extend(items)
         self._scan_found_count = found_count
-        self.grid.append_items(items)
-        self.apply_filter(self.search_box.text())
+        if not self._using_favorites_search():
+            self.items = self._folder_items
+            self.grid.append_items(items)
+            self._apply_grid_filter(self.search_box.text(), show_status=False)
         self.status_bar.showMessage(f"Scanning... {found_count} items found")
 
     def _handle_scan_result(self, scan_token: int, found_count: int) -> None:
         if scan_token != self._scan_token:
             return
         self._scan_found_count = found_count
+        if self.current_root in self.favorites:
+            self.favorites_index_store.save_index(self.current_root, self._folder_items)
+            self._favorite_index_ready = False
         self.update_selected_info()
         self.status_bar.showMessage(f"Found {self.grid.visible_count()} items")
 
@@ -483,7 +501,7 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage("Caching thumbnails failed")
 
     def request_thumbnail(self, item) -> None:
-        size = THUMBNAIL_DIMENSIONS[self.current_thumbnail_size]
+        size = self._thumbnail_dimension(self.current_thumbnail_size)
         path_key = str(item.preview_path)
         generation = self._thumbnail_generation
         key = (generation, path_key, size)
@@ -502,7 +520,7 @@ class MainWindow(QMainWindow):
         self._thumb_jobs.discard((generation, path_key, size))
         if generation != self._thumbnail_generation:
             return
-        if size != THUMBNAIL_DIMENSIONS[self.current_thumbnail_size]:
+        if size != self._thumbnail_dimension(self.current_thumbnail_size):
             return
         self.grid.set_thumbnail(path_key, pixmap)
         if self.thumbnail_pool.activeThreadCount() < 2:
@@ -514,8 +532,11 @@ class MainWindow(QMainWindow):
         for thumb_size, button in self.size_buttons.items():
             button.setChecked(thumb_size == size)
         self._reset_thumbnail_queue()
-        self.grid.set_thumbnail_size(THUMBNAIL_DIMENSIONS[size])
+        self.grid.set_thumbnail_size(self._thumbnail_dimension(size))
         self.request_visible_thumbnails()
+
+    def _thumbnail_dimension(self, size: ThumbnailSize) -> int:
+        return scale_px(THUMBNAIL_DIMENSIONS[size], self)
 
     def save_naming_convention(self, text: str) -> None:
         self.settings.save_naming_convention(text)
@@ -536,10 +557,101 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage("Naming convention preset loaded.")
 
     def apply_filter(self, text: str) -> None:
+        if self._using_favorites_search():
+            if not self._ensure_favorites_items():
+                return
+        elif self.items is not self._folder_items:
+            self._restore_folder_items()
+        self._apply_grid_filter(text)
+
+    def _apply_grid_filter(self, text: str, show_status: bool = True) -> None:
         self.grid.apply_filter(text, self.extension_filter_box.text())
         self.request_visible_thumbnails()
         self.update_selected_info()
-        self.status_bar.showMessage(f"Found {self.grid.visible_count()} items")
+        if show_status:
+            self.status_bar.showMessage(f"Found {self.grid.visible_count()} items")
+
+    def _favorites_search_toggled(self, checked: bool) -> None:
+        if checked:
+            if not self._ensure_favorites_items():
+                return
+            self._apply_grid_filter(self.search_box.text())
+            return
+        self._restore_folder_items()
+        self._apply_grid_filter(self.search_box.text())
+
+    def _using_favorites_search(self) -> bool:
+        return self.favorites_search_checkbox.isChecked()
+
+    def _favorite_signature(self) -> tuple[str, ...]:
+        return tuple(sorted(str(path.resolve()) for path in self.favorites if path.exists()))
+
+    def _ensure_favorites_items(self) -> bool:
+        if not self.favorites:
+            self._favorite_items = []
+            self._favorite_index_ready = True
+            self._favorite_index_signature = ()
+            self._show_items([])
+            self.status_bar.showMessage("Add folders to Favorites first.")
+            return True
+
+        signature = self._favorite_signature()
+        if self._favorite_index_ready and signature == self._favorite_index_signature:
+            if self.items is not self._favorite_items:
+                self._show_items(self._favorite_items)
+            return True
+
+        if self.current_favorites_index is not None:
+            self.status_bar.showMessage("Loading favorites index...")
+            return False
+
+        worker = FavoritesIndexWorker([path for path in self.favorites if path.exists()], self.favorites_index_store)
+        worker.signals.progress.connect(self.status_bar.showMessage)
+        worker.signals.finished.connect(
+            lambda items, root_count, worker_signature=signature: self._favorites_index_finished(
+                worker_signature,
+                items,
+                root_count,
+            )
+        )
+        worker.signals.error.connect(self._favorites_index_failed)
+        self.current_favorites_index = worker
+        self.status_bar.showMessage("Loading favorites index...")
+        self.index_pool.start(worker)
+        return False
+
+    def _favorites_index_finished(
+        self,
+        signature: tuple[str, ...],
+        items: list,
+        root_count: int,
+    ) -> None:
+        self.current_favorites_index = None
+        self._favorite_items = items
+        self._favorite_index_signature = signature
+        self._favorite_index_ready = True
+        if self._using_favorites_search() and signature == self._favorite_signature():
+            self._show_items(self._favorite_items)
+            self._apply_grid_filter(self.search_box.text(), show_status=False)
+            self.status_bar.showMessage(
+                f"Loaded favorites index for {root_count} folder(s). {self.grid.visible_count()} items found"
+            )
+
+    def _favorites_index_failed(self, message: str) -> None:
+        self.current_favorites_index = None
+        self._favorite_index_ready = False
+        QMessageBox.warning(self, "Favorites Index Error", message)
+        self.status_bar.showMessage("Favorites index failed")
+
+    def _restore_folder_items(self) -> None:
+        self._show_items(self._folder_items)
+
+    def _show_items(self, items: list) -> None:
+        self._prefetch_timer.stop()
+        self._reset_thumbnail_queue()
+        self.items = items
+        self.grid.set_items(items)
+        self.update_selected_info()
 
     def seek_selected_item(self) -> None:
         current = self.grid.currentItem()
@@ -629,11 +741,22 @@ class MainWindow(QMainWindow):
             self.favorites.append(path)
             self.settings.save(self.favorites)
             self.folder_browser.set_favorites(self.favorites)
+            self._favorite_index_ready = False
+            self._favorite_index_signature = ()
 
     def remove_favorite(self, path: Path) -> None:
         self.favorites = [favorite for favorite in self.favorites if favorite != path]
         self.settings.save(self.favorites)
         self.folder_browser.set_favorites(self.favorites)
+        self._favorite_items = [
+            item
+            for item in self._favorite_items
+            if not (item.folder == path or path in item.folder.parents)
+        ]
+        self._favorite_index_ready = False
+        self._favorite_index_signature = ()
+        if self._using_favorites_search():
+            self.apply_filter(self.search_box.text())
 
     def import_dropped_files(self, paths: list[Path]) -> None:
         if self.current_root is None or not self.current_root.is_dir() or is_drive_root(self.current_root):
@@ -775,7 +898,7 @@ class MainWindow(QMainWindow):
         browser = AssociatedBrowserDialog(
             items,
             current_index,
-            THUMBNAIL_DIMENSIONS[self.current_thumbnail_size],
+            self._thumbnail_dimension(self.current_thumbnail_size),
             self,
             window_title,
             count_label,
@@ -1099,6 +1222,9 @@ class MainWindow(QMainWindow):
 
 def run() -> None:
     set_windows_app_user_model_id()
+    QGuiApplication.setHighDpiScaleFactorRoundingPolicy(
+        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+    )
     app = QApplication(sys.argv)
     app.setApplicationName("Texture Browser")
     app.setOrganizationName("TextureBrowser")

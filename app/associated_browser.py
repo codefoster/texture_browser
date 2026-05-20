@@ -8,6 +8,7 @@ from PySide6.QtWidgets import QDialog, QLabel, QVBoxLayout, QWidget
 from app.models import MediaItem
 from app.thumbnail_grid import ThumbnailGrid
 from app.thumbnailer import ThumbnailWorker
+from app.utils import scale_px
 from app.viewer import ViewerWindow
 
 
@@ -23,7 +24,7 @@ class AssociatedBrowserDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(window_title)
-        self.resize(920, 620)
+        self.resize(scale_px(920, self), scale_px(620, self))
 
         self.items = items
         self.current_index = max(0, min(current_index, len(items) - 1)) if items else 0

@@ -17,14 +17,14 @@ from PySide6.QtWidgets import (
 
 from app.models import MediaItem
 from app.thumbnailer import build_placeholder, load_media_qimage
-from app.utils import format_type_label
+from app.utils import format_type_label, scale_px
 
 
 class ViewerWindow(QDialog):
     def __init__(self, items: list[MediaItem], current_index: int, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Texture Browser Viewer")
-        self.resize(1100, 760)
+        self.resize(scale_px(1100, self), scale_px(760, self))
 
         self.items = items
         self.current_index = max(0, min(current_index, len(items) - 1)) if items else 0
@@ -61,7 +61,7 @@ class ViewerWindow(QDialog):
         self.zoom_slider.setValue(0)
         self.zoom_slider.valueChanged.connect(self._apply_zoom)
         self.zoom_label = QLabel("Fit")
-        self.zoom_label.setMinimumWidth(42)
+        self.zoom_label.setMinimumWidth(scale_px(42, self))
 
         buttons = QHBoxLayout()
         buttons.addWidget(self.prev_item_button)
@@ -115,7 +115,7 @@ class ViewerWindow(QDialog):
         if self.item.is_video:
             image = load_media_qimage(self.item)
             if image is None or image.isNull():
-                self._set_pixmap(build_placeholder(self.item.extension, 480, True))
+                self._set_pixmap(build_placeholder(self.item.extension, scale_px(480, self), True))
             else:
                 self._set_image(image)
         else:
@@ -131,7 +131,7 @@ class ViewerWindow(QDialog):
             )
             image = load_media_qimage(frame_item)
             if image is None or image.isNull():
-                self._set_pixmap(build_placeholder(self.item.extension, 480, False))
+                self._set_pixmap(build_placeholder(self.item.extension, scale_px(480, self), False))
             else:
                 self._set_image(image)
 
@@ -167,7 +167,7 @@ class ViewerWindow(QDialog):
     def _set_image(self, image: QImage) -> None:
         pixmap = QPixmap.fromImage(image)
         if pixmap.isNull():
-            self._set_pixmap(build_placeholder(self.item.extension, 480, self.item.is_video))
+            self._set_pixmap(build_placeholder(self.item.extension, scale_px(480, self), self.item.is_video))
             return
         self._set_pixmap(pixmap)
 
