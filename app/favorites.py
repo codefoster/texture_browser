@@ -67,6 +67,12 @@ class FavoritesStore:
     def save_naming_convention(self, value: str) -> None:
         self.settings.setValue("naming_convention", value)
 
+    def load_sequence_grouping_enabled(self) -> bool:
+        return self.settings.value("sequence_grouping_enabled", True, bool)
+
+    def save_sequence_grouping_enabled(self, value: bool) -> None:
+        self.settings.setValue("sequence_grouping_enabled", bool(value))
+
     def load_naming_presets(self) -> dict[str, str]:
         value = self.settings.value("naming_presets", "{}", str)
         try:

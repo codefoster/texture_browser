@@ -8,8 +8,10 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QRunnable, Signal
 
 from app.models import MediaItem, MediaKind, SequenceInfo
-from app.sequence_detector import build_media_items
+from app.sequence_detector import build_media_items, normalize_grouped_sequence_items
 from app.utils import app_data_dir, is_cache_folder, is_supported_media
+
+INDEX_VERSION = 2
 
 
 class FavoritesIndexWorkerSignals(QObject):
@@ -19,10 +21,11 @@ class FavoritesIndexWorkerSignals(QObject):
 
 
 class FavoritesIndexWorker(QRunnable):
-    def __init__(self, roots: list[Path], store: "FavoritesIndexStore") -> None:
+    def __init__(self, roots: list[Path], store: "FavoritesIndexStore", group_sequences: bool = True) -> None:
         super().__init__()
         self.roots = roots
         self.store = store
+        self.group_sequences = group_sequences
         self.signals = FavoritesIndexWorkerSignals()
 
     def run(self) -> None:
@@ -33,12 +36,12 @@ class FavoritesIndexWorker(QRunnable):
                 if not root.exists():
                     continue
                 self.signals.progress.emit(f"Loading favorites index: {root}")
-                if self.store.has_index(root):
-                    items = self.store.load_index(root)
+                if self.store.has_index(root, self.group_sequences):
+                    items = self.store.load_index(root, self.group_sequences)
                 else:
                     self.signals.progress.emit(f"Building favorites index: {root}")
-                    items = self.store.build_index(root, self.signals.progress.emit)
-                    self.store.save_index(root, items)
+                    items = self.store.build_index(root, self.group_sequences, self.signals.progress.emit)
+                    self.store.save_index(root, items, self.group_sequences)
                 all_items.extend(items)
                 indexed_roots += 1
 
@@ -53,11 +56,11 @@ class FavoritesIndexStore:
         self.root = app_data_dir() / "favorites_index"
         self.root.mkdir(parents=True, exist_ok=True)
 
-    def has_index(self, root: Path) -> bool:
-        return self._index_path(root).exists()
+    def has_index(self, root: Path, group_sequences: bool = True) -> bool:
+        return self._index_path(root, group_sequences).exists()
 
-    def load_index(self, root: Path) -> list[MediaItem]:
-        index_path = self._index_path(root)
+    def load_index(self, root: Path, group_sequences: bool = True) -> list[MediaItem]:
+        index_path = self._index_path(root, group_sequences)
         if not index_path.exists():
             return []
         try:
@@ -65,6 +68,8 @@ class FavoritesIndexStore:
         except (OSError, json.JSONDecodeError):
             return []
         if not isinstance(payload, dict):
+            return []
+        if payload.get("version") != INDEX_VERSION:
             return []
 
         items_payload = payload.get("items", [])
@@ -77,17 +82,21 @@ class FavoritesIndexStore:
             if item is None:
                 continue
             items.append(item)
+        if group_sequences:
+            return normalize_grouped_sequence_items(items)
         return items
 
-    def save_index(self, root: Path, items: list[MediaItem]) -> None:
+    def save_index(self, root: Path, items: list[MediaItem], group_sequences: bool = True) -> None:
         payload = {
+            "version": INDEX_VERSION,
             "root": str(root),
+            "group_sequences": group_sequences,
             "items": [self._serialize_item(item) for item in items],
         }
-        index_path = self._index_path(root)
+        index_path = self._index_path(root, group_sequences)
         index_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
-    def build_index(self, root: Path, progress_callback=None) -> list[MediaItem]:
+    def build_index(self, root: Path, group_sequences: bool = True, progress_callback=None) -> list[MediaItem]:
         items: list[MediaItem] = []
         seen = 0
         found = 0
@@ -105,15 +114,16 @@ class FavoritesIndexStore:
                     paths.append(path)
             if not paths:
                 continue
-            directory_items = build_media_items(paths)
+            directory_items = build_media_items(paths, group_sequences)
             items.extend(directory_items)
             found += len(directory_items)
 
         items.sort(key=lambda item: (str(item.folder).lower(), item.display_name.lower()))
         return items
 
-    def _index_path(self, root: Path) -> Path:
-        digest = hashlib.sha256(str(root.resolve()).encode("utf-8")).hexdigest()
+    def _index_path(self, root: Path, group_sequences: bool) -> Path:
+        mode = "grouped" if group_sequences else "frames"
+        digest = hashlib.sha256(f"{root.resolve()}|{mode}|v{INDEX_VERSION}".encode("utf-8")).hexdigest()
         return self.root / f"{digest}.json"
 
     def _serialize_item(self, item: MediaItem) -> dict:

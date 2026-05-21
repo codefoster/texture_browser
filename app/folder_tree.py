@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QSplitter,
     QTreeView,
     QVBoxLayout,
     QWidget,
@@ -29,7 +30,6 @@ class FolderBrowser(QWidget):
         self._current_folder: Path | None = None
 
         self.favorites_list = QListWidget()
-        self.favorites_list.setMaximumHeight(scale_px(120, self))
         self.favorites_list.itemDoubleClicked.connect(self._on_favorite_activated)
         self.favorites_list.itemChanged.connect(self._on_favorite_changed)
 
@@ -53,17 +53,36 @@ class FolderBrowser(QWidget):
         self.tree.setHeaderHidden(True)
         self.tree.setAnimated(True)
         self.tree.setIndentation(scale_px(16, self))
+        self.tree.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        self.tree.setHorizontalScrollMode(QTreeView.ScrollPerPixel)
+        self.tree.setMinimumWidth(0)
         for column in range(1, 4):
             self.tree.hideColumn(column)
         self.tree.selectionModel().currentChanged.connect(self._on_current_changed)
         self.tree.doubleClicked.connect(self._on_tree_double_clicked)
 
+        favorites_panel = QWidget()
+        favorites_layout = QVBoxLayout(favorites_panel)
+        favorites_layout.setContentsMargins(0, 0, 0, 0)
+        favorites_layout.addLayout(favorites_header)
+        favorites_layout.addWidget(self.favorites_list, 1)
+
+        folders_panel = QWidget()
+        folders_layout = QVBoxLayout(folders_panel)
+        folders_layout.setContentsMargins(0, 0, 0, 0)
+        folders_layout.addWidget(QLabel("Folders"))
+        folders_layout.addWidget(self.tree, 1)
+
+        self.vertical_splitter = QSplitter(Qt.Vertical)
+        self.vertical_splitter.addWidget(favorites_panel)
+        self.vertical_splitter.addWidget(folders_panel)
+        self.vertical_splitter.setChildrenCollapsible(False)
+        self.vertical_splitter.setSizes([scale_px(180, self), scale_px(420, self)])
+        self.vertical_splitter.setOpaqueResize(True)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addLayout(favorites_header)
-        layout.addWidget(self.favorites_list)
-        layout.addWidget(QLabel("Folders"))
-        layout.addWidget(self.tree, 1)
+        layout.addWidget(self.vertical_splitter, 1)
 
     def set_current_folder(self, folder: Path) -> None:
         self._current_folder = folder

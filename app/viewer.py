@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QSize, Qt
-from PySide6.QtGui import QImage, QKeySequence, QMouseEvent, QPixmap, QShortcut, QWheelEvent
+from PySide6.QtCore import QEvent, QPoint, QPointF, QSize, Qt
+from PySide6.QtGui import QCursor, QImage, QKeySequence, QMouseEvent, QPixmap, QShortcut, QWheelEvent
 from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
@@ -30,6 +30,10 @@ class ViewerWindow(QDialog):
         self.current_index = max(0, min(current_index, len(items) - 1)) if items else 0
         self.sequence_index = 0
         self.original_pixmap = QPixmap()
+        self._pan_active = False
+        self._pan_start = QPoint()
+        self._pan_scroll_start = QPoint()
+        self._pending_zoom_anchor: tuple[float, float, QPointF] | None = None
 
         self.title_label = QLabel()
         self.info_label = QLabel()
@@ -159,9 +163,16 @@ class ViewerWindow(QDialog):
         self.refresh()
 
     def eventFilter(self, watched, event) -> bool:
-        if watched is self.scroll_area.viewport() and event.type() == QEvent.Wheel:
-            self._zoom_from_wheel(event)
-            return True
+        if watched is self.scroll_area.viewport():
+            if event.type() == QEvent.Wheel:
+                self._zoom_from_wheel(event)
+                return True
+            if event.type() == QEvent.MouseButtonPress:
+                return self._start_pan(event)
+            if event.type() == QEvent.MouseMove:
+                return self._update_pan(event)
+            if event.type() == QEvent.MouseButtonRelease:
+                return self._end_pan(event)
         return super().eventFilter(watched, event)
 
     def _set_image(self, image: QImage) -> None:
@@ -200,6 +211,7 @@ class ViewerWindow(QDialog):
         pixmap = self.original_pixmap.scaled(scaled_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.image_label.setPixmap(pixmap)
         self.image_label.setFixedSize(pixmap.size())
+        self._apply_pending_zoom_anchor()
 
     def _fit_zoom_percent(self) -> int:
         if self.original_pixmap.isNull():
@@ -216,6 +228,7 @@ class ViewerWindow(QDialog):
         if delta == 0:
             return
 
+        self._set_zoom_anchor(event.position())
         current = self.zoom_slider.value()
         if current == 0:
             current = self._fit_zoom_percent()
@@ -223,6 +236,62 @@ class ViewerWindow(QDialog):
         value = current + step if delta > 0 else current - step
         self.zoom_slider.setValue(max(10, min(400, value)))
         event.accept()
+
+    def _set_zoom_anchor(self, viewport_position: QPointF) -> None:
+        pixmap = self.image_label.pixmap()
+        if pixmap is None or pixmap.isNull():
+            self._pending_zoom_anchor = None
+            return
+
+        label_pos = self.image_label.mapFrom(self.scroll_area.viewport(), viewport_position.toPoint())
+        width = max(1, self.image_label.width())
+        height = max(1, self.image_label.height())
+        x_ratio = min(1.0, max(0.0, label_pos.x() / width))
+        y_ratio = min(1.0, max(0.0, label_pos.y() / height))
+        self._pending_zoom_anchor = (x_ratio, y_ratio, viewport_position)
+
+    def _apply_pending_zoom_anchor(self) -> None:
+        if self._pending_zoom_anchor is None:
+            return
+        x_ratio, y_ratio, viewport_position = self._pending_zoom_anchor
+        self._pending_zoom_anchor = None
+
+        new_width = self.image_label.width()
+        new_height = self.image_label.height()
+        h_scroll = self.scroll_area.horizontalScrollBar()
+        v_scroll = self.scroll_area.verticalScrollBar()
+        h_scroll.setValue(int(new_width * x_ratio - viewport_position.x()))
+        v_scroll.setValue(int(new_height * y_ratio - viewport_position.y()))
+
+    def _start_pan(self, event: QMouseEvent) -> bool:
+        if event.button() != Qt.MiddleButton:
+            return False
+        self._pan_active = True
+        self._pan_start = event.position().toPoint()
+        self._pan_scroll_start = QPoint(
+            self.scroll_area.horizontalScrollBar().value(),
+            self.scroll_area.verticalScrollBar().value(),
+        )
+        self.scroll_area.viewport().setCursor(QCursor(Qt.ClosedHandCursor))
+        event.accept()
+        return True
+
+    def _update_pan(self, event: QMouseEvent) -> bool:
+        if not self._pan_active:
+            return False
+        delta = event.position().toPoint() - self._pan_start
+        self.scroll_area.horizontalScrollBar().setValue(self._pan_scroll_start.x() - delta.x())
+        self.scroll_area.verticalScrollBar().setValue(self._pan_scroll_start.y() - delta.y())
+        event.accept()
+        return True
+
+    def _end_pan(self, event: QMouseEvent) -> bool:
+        if not self._pan_active or event.button() != Qt.MiddleButton:
+            return False
+        self._pan_active = False
+        self.scroll_area.viewport().unsetCursor()
+        event.accept()
+        return True
 
     def showEvent(self, event) -> None:
         super().showEvent(event)

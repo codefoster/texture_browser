@@ -19,9 +19,10 @@ class ScanWorkerSignals(QObject):
 
 
 class ScanWorker(QRunnable):
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, group_sequences: bool = True) -> None:
         super().__init__()
         self.root = root
+        self.group_sequences = group_sequences
         self.signals = ScanWorkerSignals()
         self._cancelled = False
 
@@ -56,7 +57,7 @@ class ScanWorker(QRunnable):
                         paths.append(path)
                 if not paths:
                     continue
-                items: list[MediaItem] = build_media_items(paths)
+                items: list[MediaItem] = build_media_items(paths, self.group_sequences)
                 if items:
                     found += len(items)
                     self.signals.batch.emit(items, found)

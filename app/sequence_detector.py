@@ -8,7 +8,7 @@ from app.models import MediaItem, MediaKind, SequenceInfo
 from app.utils import MODEL_EXTENSIONS, VIDEO_EXTENSIONS
 
 SEQUENCE_PATTERN = re.compile(
-    r"^(?P<prefix>.+?)(?P<sep>[._-])(?P<frame>\d{3,6})(?P<suffix>\.[^.]+)$",
+    r"^(?P<prefix>.+?)(?P<sep>[._-])(?P<frame>\d{2,6})(?P<suffix>\.[^.]+)$",
     re.IGNORECASE,
 )
 
@@ -17,7 +17,30 @@ def _search_text(*parts: str) -> str:
     return " ".join(part.lower() for part in parts if part)
 
 
-def build_media_items(paths: list[Path]) -> list[MediaItem]:
+def build_media_items(paths: list[Path], group_sequences: bool = True) -> list[MediaItem]:
+    if not group_sequences:
+        items: list[MediaItem] = []
+        for path in sorted(paths):
+            ext = path.suffix.lower()
+            if ext in VIDEO_EXTENSIONS:
+                kind = MediaKind.VIDEO
+            elif ext in MODEL_EXTENSIONS:
+                kind = MediaKind.MODEL
+            else:
+                kind = MediaKind.IMAGE
+            items.append(
+                MediaItem(
+                    display_name=path.name,
+                    path=path,
+                    kind=kind,
+                    extension=ext,
+                    folder=path.parent,
+                    search_text=_search_text(path.name, str(path.parent), ext),
+                )
+            )
+        items.sort(key=lambda item: (str(item.folder).lower(), item.display_name.lower()))
+        return items
+
     grouped: dict[tuple[Path, str, str, str], list[tuple[Path, int, int]]] = defaultdict(list)
     singles: list[Path] = []
 
@@ -96,5 +119,31 @@ def build_media_items(paths: list[Path]) -> list[MediaItem]:
             )
         )
 
-    items.sort(key=lambda item: (str(item.folder).lower(), item.display_name.lower()))
-    return items
+    return normalize_grouped_sequence_items(items)
+
+
+def normalize_grouped_sequence_items(items: list[MediaItem]) -> list[MediaItem]:
+    sequence_frame_paths: set[Path] = set()
+    for item in items:
+        if item.sequence:
+            sequence_frame_paths.update(frame_path.resolve() for frame_path in item.sequence.frame_paths)
+
+    if not sequence_frame_paths:
+        items.sort(key=lambda item: (str(item.folder).lower(), item.display_name.lower()))
+        return items
+
+    cleaned: list[MediaItem] = []
+    for item in items:
+        if item.sequence:
+            cleaned.append(item)
+            continue
+        try:
+            preview_path = item.preview_path.resolve()
+        except OSError:
+            preview_path = item.preview_path
+        if item.kind == MediaKind.IMAGE and preview_path in sequence_frame_paths:
+            continue
+        cleaned.append(item)
+
+    cleaned.sort(key=lambda item: (str(item.folder).lower(), item.display_name.lower()))
+    return cleaned

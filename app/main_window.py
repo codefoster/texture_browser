@@ -166,17 +166,26 @@ ROLE_SORT_ORDER = [
 
 IMAGE_SIZE_FILTERS = [
     ("Any size", None),
-    ("Up to 48 px", 48),
-    ("Up to 64 px", 64),
-    ("Up to 128 px", 128),
-    ("Up to 256 px", 256),
-    ("Up to 512 px", 512),
-    ("Up to 1K", 1024),
-    ("Up to 2K", 2048),
-    ("Up to 4K", 4096),
-    ("Up to 8K", 8192),
-    ("Up to 16K", 16384),
-    ("16K+", "16k+"),
+    ("Up to 48 px", ("max", 48)),
+    ("48+ px", ("min", 48)),
+    ("Up to 64 px", ("max", 64)),
+    ("64+ px", ("min", 64)),
+    ("Up to 128 px", ("max", 128)),
+    ("128+ px", ("min", 128)),
+    ("Up to 256 px", ("max", 256)),
+    ("256+ px", ("min", 256)),
+    ("Up to 512 px", ("max", 512)),
+    ("512+ px", ("min", 512)),
+    ("Up to 1K", ("max", 1024)),
+    ("1K+", ("min", 1024)),
+    ("Up to 2K", ("max", 2048)),
+    ("2K+", ("min", 2048)),
+    ("Up to 4K", ("max", 4096)),
+    ("4K+", ("min", 4096)),
+    ("Up to 8K", ("max", 8192)),
+    ("8K+", ("min", 8192)),
+    ("Up to 16K", ("max", 16384)),
+    ("16K+", ("min", 16384)),
 ]
 
 
@@ -219,6 +228,7 @@ class MainWindow(QMainWindow):
         self.current_favorites_index: FavoritesIndexWorker | None = None
         self.current_root: Path | None = None
         self._queued_folder: Path | None = None
+        self.sequence_grouping_enabled = self.settings.load_sequence_grouping_enabled()
         self.items = []
         self._folder_items = []
         self._favorite_items = []
@@ -247,6 +257,9 @@ class MainWindow(QMainWindow):
         self.search_box.returnPressed.connect(self.browse_to_search_path)
         self.favorites_search_checkbox = QCheckBox("Favorites")
         self.favorites_search_checkbox.toggled.connect(self._favorites_search_toggled)
+        self.sequence_grouping_checkbox = QCheckBox("Sequences")
+        self.sequence_grouping_checkbox.setChecked(self.sequence_grouping_enabled)
+        self.sequence_grouping_checkbox.toggled.connect(self.set_sequence_grouping_enabled)
         self.browse_path_button = QPushButton("Browse Path")
         self.browse_path_button.clicked.connect(self.browse_to_search_path)
         self.seek_button = QPushButton("Seek")
@@ -311,10 +324,12 @@ class MainWindow(QMainWindow):
         )
 
         right_panel = QWidget()
+        right_panel.setMinimumWidth(0)
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
         search_row = QHBoxLayout()
         search_row.addWidget(self.favorites_search_checkbox)
+        search_row.addWidget(self.sequence_grouping_checkbox)
         search_row.addWidget(self.search_box, 1)
         search_row.addWidget(self.browse_path_button)
         search_row.addWidget(self.seek_button)
@@ -326,8 +341,10 @@ class MainWindow(QMainWindow):
         splitter = QSplitter()
         splitter.addWidget(self.folder_browser)
         splitter.addWidget(right_panel)
+        splitter.setChildrenCollapsible(True)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([scale_px(340, self), scale_px(1100, self)])
+        self.folder_browser.setMinimumWidth(0)
 
         container = QWidget()
         layout = QVBoxLayout(container)
@@ -458,7 +475,7 @@ class MainWindow(QMainWindow):
         self._scan_token += 1
         self._scan_found_count = 0
         token = self._scan_token
-        worker = ScanWorker(path)
+        worker = ScanWorker(path, self.sequence_grouping_enabled)
         worker.signals.progress.connect(self.status_bar.showMessage)
         worker.signals.batch.connect(
             lambda items, found_count, scan_token=token: self._handle_scan_batch(scan_token, items, found_count)
@@ -518,7 +535,7 @@ class MainWindow(QMainWindow):
             return
         self._scan_found_count = found_count
         if self.current_root in self.favorites:
-            self.favorites_index_store.save_index(self.current_root, self._folder_items)
+            self.favorites_index_store.save_index(self.current_root, self._folder_items, self.sequence_grouping_enabled)
             self._favorite_index_ready = False
         self.update_selected_info()
         self.status_bar.showMessage(f"Found {self.grid.visible_count()} items")
@@ -639,9 +656,10 @@ class MainWindow(QMainWindow):
             if dimensions is None:
                 return False
             longest_side = max(dimensions)
-            if selected == "16k+":
-                return longest_side >= 16384
-            return longest_side <= int(selected)
+            mode, limit = selected
+            if mode == "min":
+                return longest_side >= int(limit)
+            return longest_side <= int(limit)
 
         return predicate
 
@@ -689,7 +707,11 @@ class MainWindow(QMainWindow):
             self.status_bar.showMessage("Loading favorites index...")
             return False
 
-        worker = FavoritesIndexWorker(self._selected_favorites(), self.favorites_index_store)
+        worker = FavoritesIndexWorker(
+            self._selected_favorites(),
+            self.favorites_index_store,
+            self.sequence_grouping_enabled,
+        )
         worker.signals.progress.connect(self.status_bar.showMessage)
         worker.signals.finished.connect(
             lambda items, root_count, worker_signature=signature: self._favorites_index_finished(
@@ -873,6 +895,19 @@ class MainWindow(QMainWindow):
         self._favorite_index_signature = ()
         if self._using_favorites_search():
             self.apply_filter(self.search_box.text())
+
+    def set_sequence_grouping_enabled(self, enabled: bool) -> None:
+        self.sequence_grouping_enabled = enabled
+        self.settings.save_sequence_grouping_enabled(enabled)
+        self._favorite_index_ready = False
+        self._favorite_index_signature = ()
+        if self._using_favorites_search():
+            self._show_items([])
+            self.apply_filter(self.search_box.text())
+            return
+        if self.current_root is not None and self.current_root.exists() and not is_drive_root(self.current_root):
+            self._show_items([])
+            self.select_folder(self.current_root)
 
     def import_dropped_files(self, paths: list[Path]) -> None:
         if self.current_root is None or not self.current_root.is_dir() or is_drive_root(self.current_root):
