@@ -107,12 +107,12 @@ class FolderBrowser(QWidget):
         path = Path(self.model.filePath(current))
         if path.exists():
             self._current_folder = path
-            self.folderSelected.emit(path)
 
     def _on_tree_double_clicked(self, index: QModelIndex) -> None:
         path = Path(self.model.filePath(index))
         if path.exists():
-            self.folderOpenRequested.emit(path)
+            self._current_folder = path
+            self.folderSelected.emit(path)
 
     def _on_favorite_activated(self, item: QListWidgetItem) -> None:
         path = item.data(Qt.UserRole)

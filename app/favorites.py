@@ -73,6 +73,24 @@ class FavoritesStore:
     def save_sequence_grouping_enabled(self, value: bool) -> None:
         self.settings.setValue("sequence_grouping_enabled", bool(value))
 
+    def load_hide_duplicates_enabled(self) -> bool:
+        return self.settings.value("hide_duplicates_enabled", False, bool)
+
+    def save_hide_duplicates_enabled(self, value: bool) -> None:
+        self.settings.setValue("hide_duplicates_enabled", bool(value))
+
+    def load_image_size_filter(self) -> str:
+        return self.settings.value("image_size_filter", "Any size", str)
+
+    def save_image_size_filter(self, value: str) -> None:
+        self.settings.setValue("image_size_filter", value)
+
+    def load_active_tag_filter(self) -> str:
+        return self.settings.value("active_tag_filter", "", str).strip()
+
+    def save_active_tag_filter(self, value: str) -> None:
+        self.settings.setValue("active_tag_filter", value.strip())
+
     def load_naming_presets(self) -> dict[str, str]:
         value = self.settings.value("naming_presets", "{}", str)
         try:

@@ -9,19 +9,22 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QThreadPool, Qt, QTimer
-from PySide6.QtGui import QGuiApplication, QIcon, QImageReader
+from PySide6.QtGui import QCursor, QGuiApplication, QIcon, QImageReader, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
     QFileDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QInputDialog,
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QSplashScreen,
     QSplitter,
     QStatusBar,
     QToolBar,
@@ -31,26 +34,33 @@ from PySide6.QtWidgets import (
 
 from app.associated_browser import AssociatedBrowserDialog
 from app.cache_worker import CacheWorker
+from app.channel_inspector import ChannelInspectorDialog
 from app.favorites import FavoritesStore
 from app.favorites_index import FavoritesIndexStore, FavoritesIndexWorker
 from app.folder_tree import FolderBrowser
 from app.models import THUMBNAIL_DIMENSIONS, ThumbnailSize
 from app.naming_presets import NamingPresetDialog
 from app.scanner import ScanWorker
+from app.tag_store import TagStore, normalize_tag_name, tag_database_exists
 from app.thumbnail_grid import ThumbnailGrid
 from app.thumbnailer import ThumbnailWorker
+from app.texture_sets import texture_set_for_item, validate_texture_set
 from app.utils import (
     format_type_label,
+    find_library_cache_root,
     is_drive_root,
     open_fbx_in_viewer,
     open_folder_in_explorer,
     open_video_in_vlc,
     scale_px,
 )
+from app.validation_report import TextureSetValidationDialog
 from app.viewer import ViewerWindow
+from app.workflow_filter import workflow_filter_predicate
 
 
 APP_USER_MODEL_ID = "TextureBrowser.TextureBrowser"
+ANY_TAG_LABEL = "Any tag"
 TEXTURE_ROLE_TERMS = {
     "albedo",
     "alpha",
@@ -198,6 +208,29 @@ def app_icon() -> QIcon:
     return QIcon(str(resource_path("assets/app_icon.ico")))
 
 
+def app_splash_pixmap() -> QPixmap:
+    pixmap = QPixmap(str(resource_path("assets/AB_Splash_01.png")))
+    if pixmap.isNull():
+        return pixmap
+    return pixmap.scaled(720, 405, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+
+def create_splash(message: str = "", screen=None) -> QSplashScreen | None:
+    pixmap = app_splash_pixmap()
+    if pixmap.isNull():
+        return None
+    splash = QSplashScreen(pixmap)
+    target_screen = screen or QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
+    if target_screen is not None:
+        screen_rect = target_screen.availableGeometry()
+        splash_rect = splash.frameGeometry()
+        splash_rect.moveCenter(screen_rect.center())
+        splash.move(splash_rect.topLeft())
+    if message:
+        splash.showMessage(message, Qt.AlignBottom | Qt.AlignHCenter, Qt.white)
+    return splash
+
+
 def set_windows_app_user_model_id() -> None:
     if sys.platform != "win32":
         return
@@ -232,6 +265,13 @@ class MainWindow(QMainWindow):
         self.items = []
         self._folder_items = []
         self._favorite_items = []
+        self._folder_scan_cache: dict[tuple[str, bool], list] = {}
+        self._loading_cached_folder = False
+        self._duplicate_first_keys: dict[str, tuple[Path, str]] = {}
+        self._duplicate_hidden_keys: set[tuple[Path, str]] = set()
+        self._tag_filter_lookup: dict[Path, set[str]] = {}
+        self._tagged_item_keys: set[tuple[Path, str]] = set()
+        self._selected_tag_filter = self.settings.load_active_tag_filter()
         self._favorite_index_signature: tuple[str, ...] = ()
         self._favorite_index_ready = False
         self._thumb_jobs: set[tuple[int, str, int]] = set()
@@ -239,6 +279,8 @@ class MainWindow(QMainWindow):
         self._scan_token = 0
         self._scan_found_count = 0
         self._selection_windows: list[AssociatedBrowserDialog] = []
+        self._tool_windows: list[QDialog] = []
+        self._scan_splash: QSplashScreen | None = None
         self._prefetch_timer = QTimer(self)
         self._prefetch_timer.setSingleShot(True)
         self._prefetch_timer.setInterval(80)
@@ -260,6 +302,9 @@ class MainWindow(QMainWindow):
         self.sequence_grouping_checkbox = QCheckBox("Sequences")
         self.sequence_grouping_checkbox.setChecked(self.sequence_grouping_enabled)
         self.sequence_grouping_checkbox.toggled.connect(self.set_sequence_grouping_enabled)
+        self.hide_duplicates_checkbox = QCheckBox("Hide duplicates")
+        self.hide_duplicates_checkbox.setChecked(self.settings.load_hide_duplicates_enabled())
+        self.hide_duplicates_checkbox.toggled.connect(self.set_hide_duplicates_enabled)
         self.browse_path_button = QPushButton("Browse Path")
         self.browse_path_button.clicked.connect(self.browse_to_search_path)
         self.seek_button = QPushButton("Seek")
@@ -275,6 +320,12 @@ class MainWindow(QMainWindow):
         self.grid.filesDropped.connect(self.import_dropped_files)
         self.grid.associatedRequested.connect(self.open_associated_viewer)
         self.grid.guessRequested.connect(self.open_guess_viewer)
+        self.grid.materialSetRequested.connect(self.open_material_set_viewer)
+        self.grid.validationRequested.connect(self.open_texture_validation)
+        self.grid.channelInspectorRequested.connect(self.open_channel_inspector)
+        self.grid.tagFileRequested.connect(self.add_tag_to_file)
+        self.grid.tagMaterialSetRequested.connect(self.add_tag_to_material_set)
+        self.grid.removeTagRequested.connect(self.remove_tag_from_item)
 
         size_bar = QHBoxLayout()
         self.thumbnails_label = self._section_label("Thumbnails")
@@ -298,18 +349,30 @@ class MainWindow(QMainWindow):
         self.image_size_filter_box.setMinimumWidth(scale_px(132, self))
         for label, value in IMAGE_SIZE_FILTERS:
             self.image_size_filter_box.addItem(label, value)
-        self.image_size_filter_box.currentIndexChanged.connect(lambda _index: self.apply_filter(self.search_box.text()))
+        self.image_size_filter_box.currentIndexChanged.connect(self._image_size_filter_changed)
         size_bar.addSpacing(18)
         self.image_size_label = self._section_label("Image size")
         size_bar.addWidget(self.image_size_label)
         size_bar.addWidget(self.image_size_filter_box)
+        self.tag_filter_box = QComboBox()
+        self.tag_filter_box.setMinimumWidth(scale_px(132, self))
+        self.tag_filter_box.currentIndexChanged.connect(lambda _index: self._tag_filter_changed())
+        size_bar.addSpacing(18)
+        self.tag_filter_label = self._section_label("Tag")
+        size_bar.addWidget(self.tag_filter_label)
+        size_bar.addWidget(self.tag_filter_box)
         self.naming_convention_box = QLineEdit()
         self.naming_convention_box.setPlaceholderText("metallic, albedo, roughness, normal")
         self.naming_convention_box.setMinimumWidth(scale_px(280, self))
         self.naming_convention_box.textChanged.connect(self.save_naming_convention)
+        self.naming_convention_box.textChanged.connect(self._workflow_text_changed)
         size_bar.addSpacing(18)
-        self.naming_convention_label = self._section_label("Naming convention")
+        self.naming_convention_label = self._section_label("Workflow")
+        self.workflow_filter_checkbox = QCheckBox()
+        self.workflow_filter_checkbox.setToolTip("Filter filenames by the current workflow terms.")
+        self.workflow_filter_checkbox.toggled.connect(lambda _checked: self.apply_filter(self.search_box.text()))
         size_bar.addWidget(self.naming_convention_label)
+        size_bar.addWidget(self.workflow_filter_checkbox)
         size_bar.addWidget(self.naming_convention_box, 1)
         self.naming_presets_button = QPushButton("Presets")
         self.naming_presets_button.clicked.connect(self.open_naming_presets)
@@ -330,6 +393,7 @@ class MainWindow(QMainWindow):
         search_row = QHBoxLayout()
         search_row.addWidget(self.favorites_search_checkbox)
         search_row.addWidget(self.sequence_grouping_checkbox)
+        search_row.addWidget(self.hide_duplicates_checkbox)
         search_row.addWidget(self.search_box, 1)
         search_row.addWidget(self.browse_path_button)
         search_row.addWidget(self.seek_button)
@@ -378,12 +442,14 @@ class MainWindow(QMainWindow):
         stored_size = self.settings.load_thumbnail_size()
         size_choice = ThumbnailSize(stored_size) if stored_size in {size.value for size in ThumbnailSize} else ThumbnailSize.MEDIUM
         self.set_thumbnail_size(size_choice)
+        self._restore_image_size_filter()
         self.naming_convention_box.setText(self.settings.load_naming_convention())
 
         last_root = self.settings.load_last_root()
         if last_root:
             self.current_root = last_root
             self.folder_browser.set_current_folder(last_root)
+            self.refresh_tag_filter_options()
             self.status_bar.showMessage(f"Ready. Last folder: {last_root}")
 
     def choose_root_folder(self) -> None:
@@ -449,6 +515,7 @@ class MainWindow(QMainWindow):
             self._prefetch_timer.stop()
             self._reset_thumbnail_queue()
             self._folder_items = []
+            self.refresh_tag_filter_options()
             if not self._using_favorites_search():
                 self._show_items([])
             self.status_bar.showMessage(f"Select a folder inside {path} to scan. Drive roots are skipped.")
@@ -461,16 +528,41 @@ class MainWindow(QMainWindow):
             self.cancel_scan()
             self.status_bar.showMessage(f"Canceling scan. {path} is queued next...")
             return
+        if self._load_cached_folder_scan(path):
+            return
         self._queued_folder = None
         self._start_scan(path)
 
-    def _start_scan(self, path: Path) -> None:
+    def _folder_scan_cache_key(self, path: Path) -> tuple[str, bool]:
+        return (str(path.resolve()).lower(), self.sequence_grouping_enabled)
+
+    def _load_cached_folder_scan(self, path: Path) -> bool:
+        cached_items = self._folder_scan_cache.get(self._folder_scan_cache_key(path))
+        if cached_items is None:
+            return False
+        self._queued_folder = None
         self._prefetch_timer.stop()
         self._reset_thumbnail_queue()
+        self._folder_items = list(cached_items)
+        self.refresh_tag_filter_options()
+        if not self._using_favorites_search():
+            self._loading_cached_folder = True
+            self._show_items(self._folder_items, fast=True)
+            self._apply_grid_filter(self.search_box.text(), show_status=False)
+        self.status_bar.showMessage(f"Loading cached scan for {path}...")
+        return True
+
+    def _start_scan(self, path: Path) -> None:
+        self._prefetch_timer.stop()
+        self._show_scan_splash()
+        self._reset_thumbnail_queue()
         self._folder_items = []
+        self._reset_duplicate_filter_state()
+        self.refresh_tag_filter_options()
 
         if not self._using_favorites_search():
             self._show_items([])
+            self._prime_grid_filter_settings()
         self.status_bar.showMessage(f"Scanning {path}...")
         self._scan_token += 1
         self._scan_found_count = 0
@@ -489,6 +581,7 @@ class MainWindow(QMainWindow):
         self.scan_pool.start(worker)
 
     def cancel_scan(self) -> None:
+        self._hide_scan_splash()
         if self.current_scan is not None:
             self.current_scan.cancel()
         if self.current_cache is not None:
@@ -523,17 +616,21 @@ class MainWindow(QMainWindow):
         if scan_token != self._scan_token:
             return
         self._folder_items.extend(items)
+        self._record_duplicate_items(items)
+        self._record_tagged_item_keys(items)
         self._scan_found_count = found_count
         if not self._using_favorites_search():
             self.items = self._folder_items
             self.grid.append_items(items)
-            self._apply_grid_filter(self.search_box.text(), show_status=False)
         self.status_bar.showMessage(f"Scanning... {found_count} items found")
 
     def _handle_scan_result(self, scan_token: int, found_count: int) -> None:
         if scan_token != self._scan_token:
             return
+        self._hide_scan_splash()
         self._scan_found_count = found_count
+        if self.current_root is not None:
+            self._folder_scan_cache[self._folder_scan_cache_key(self.current_root)] = list(self._folder_items)
         if self.current_root in self.favorites:
             self.favorites_index_store.save_index(self.current_root, self._folder_items, self.sequence_grouping_enabled)
             self._favorite_index_ready = False
@@ -543,6 +640,7 @@ class MainWindow(QMainWindow):
     def _handle_scan_error(self, scan_token: int, message: str) -> None:
         if scan_token != self._scan_token:
             return
+        self._hide_scan_splash()
         QMessageBox.warning(self, "Scan Error", message)
         self.status_bar.showMessage("Scan failed")
 
@@ -562,6 +660,8 @@ class MainWindow(QMainWindow):
                 self.current_root = next_path
                 self.settings.save_last_root(next_path)
                 self._start_scan(next_path)
+        elif scan_token == self._scan_token:
+            self._hide_scan_splash()
 
     def _cache_finished(self, cached_count: int) -> None:
         self.current_cache = None
@@ -572,6 +672,21 @@ class MainWindow(QMainWindow):
         self.current_cache = None
         QMessageBox.warning(self, "Cache Error", message)
         self.status_bar.showMessage("Caching thumbnails failed")
+
+    def _show_scan_splash(self) -> None:
+        if self._scan_splash is not None:
+            return
+        self._scan_splash = create_splash("Scanning textures...", self.screen())
+        if self._scan_splash is None:
+            return
+        self._scan_splash.show()
+        QApplication.processEvents()
+
+    def _hide_scan_splash(self) -> None:
+        if self._scan_splash is None:
+            return
+        self._scan_splash.close()
+        self._scan_splash = None
 
     def request_thumbnail(self, item) -> None:
         size = self._thumbnail_dimension(self.current_thumbnail_size)
@@ -614,6 +729,104 @@ class MainWindow(QMainWindow):
     def save_naming_convention(self, text: str) -> None:
         self.settings.save_naming_convention(text)
 
+    def set_hide_duplicates_enabled(self, enabled: bool) -> None:
+        self.settings.save_hide_duplicates_enabled(enabled)
+        if not self._duplicate_first_keys and self.items:
+            self._rebuild_duplicate_filter_state(self.items)
+        self.apply_filter(self.search_box.text())
+
+    def add_tag_to_file(self, item) -> None:
+        tag_name = self._prompt_for_tag("Tag File")
+        if not tag_name:
+            return
+        selected_items = self._selected_items_for_action(item)
+        tagged_count = self._add_tag_to_items(tag_name, selected_items, scope="file")
+        self.refresh_tag_filter_options()
+        self.apply_filter(self.search_box.text())
+        self.status_bar.showMessage(f"Tagged {tagged_count} file(s) with {tag_name}.")
+
+    def add_tag_to_material_set(self, item) -> None:
+        tag_name = self._prompt_for_tag("Tag Material Set")
+        if not tag_name:
+            return
+        tagged_count = 0
+        seen: set[tuple[Path, str]] = set()
+        for selected_item in self._selected_items_for_action(item):
+            texture_set = texture_set_for_item(selected_item, self.items)
+            material_items = []
+            for material_item in texture_set.items:
+                key = (material_item.preview_path, material_item.display_name)
+                if key in seen:
+                    continue
+                seen.add(key)
+                material_items.append(material_item)
+            tagged_count += self._add_tag_to_items(
+                tag_name,
+                material_items,
+                scope="material_set",
+                set_key=texture_set.title,
+            )
+        self.refresh_tag_filter_options()
+        self.apply_filter(self.search_box.text())
+        self.status_bar.showMessage(f"Tagged {tagged_count} material set file(s) with {tag_name}.")
+
+    def remove_tag_from_item(self, item) -> None:
+        selected_items = self._selected_items_for_action(item)
+        root = self._tag_root_for_item(item, create=False)
+        if root is None:
+            self.status_bar.showMessage("This file has no library tag database yet.")
+            return
+        store = TagStore(root)
+        tags = store.tags_for_items(selected_items)
+        if not tags:
+            self.status_bar.showMessage("No tags found on the selected file(s).")
+            return
+        tag_name, ok = QInputDialog.getItem(self, "Remove Tag", "Tag", tags, 0, False)
+        if not ok or not tag_name:
+            return
+        removed_count = self._remove_tag_from_items(tag_name, selected_items)
+        self.refresh_tag_filter_options()
+        self.apply_filter(self.search_box.text())
+        self.status_bar.showMessage(f"Removed {tag_name} from {removed_count} file(s).")
+
+    def _selected_items_for_action(self, clicked_item) -> list:
+        selected_items = self.grid.selected_media_items()
+        clicked_key = (clicked_item.preview_path, clicked_item.display_name)
+        if any((item.preview_path, item.display_name) == clicked_key for item in selected_items):
+            return selected_items
+        return [clicked_item]
+
+    def _add_tag_to_items(self, tag_name: str, items: list, scope: str, set_key: str = "") -> int:
+        tagged_count = 0
+        for root, root_items in self._items_grouped_by_tag_root(items, create=True).items():
+            tagged_count += TagStore(root).add_items(tag_name, root_items, scope=scope, set_key=set_key)
+        return tagged_count
+
+    def _remove_tag_from_items(self, tag_name: str, items: list) -> int:
+        removed_count = 0
+        for root, root_items in self._items_grouped_by_tag_root(items, create=False).items():
+            removed_count += TagStore(root).remove_items(tag_name, root_items)
+        return removed_count
+
+    def _items_grouped_by_tag_root(self, items: list, create: bool) -> dict[Path, list]:
+        grouped: dict[Path, list] = {}
+        for item in items:
+            root = self._tag_root_for_item(item, create=create)
+            if root is None:
+                continue
+            grouped.setdefault(root, []).append(item)
+        return grouped
+
+    def _prompt_for_tag(self, title: str) -> str:
+        tags = self._all_tags_for_current_context()
+        if tags:
+            tag_name, ok = QInputDialog.getItem(self, title, "Tag", tags, 0, True)
+        else:
+            tag_name, ok = QInputDialog.getText(self, title, "Tag")
+        if not ok:
+            return ""
+        return normalize_tag_name(tag_name)
+
     def open_naming_presets(self) -> None:
         dialog = NamingPresetDialog(
             self.settings.load_naming_presets(),
@@ -627,7 +840,18 @@ class MainWindow(QMainWindow):
     def apply_naming_preset(self, convention: str) -> None:
         self.naming_convention_box.setText(convention)
         self.settings.save_naming_convention(convention)
-        self.status_bar.showMessage("Naming convention preset loaded.")
+        self.status_bar.showMessage("Workflow preset loaded.")
+
+    def _image_size_filter_changed(self, _index: int) -> None:
+        self.settings.save_image_size_filter(self.image_size_filter_box.currentText())
+        self.apply_filter(self.search_box.text())
+
+    def _restore_image_size_filter(self) -> None:
+        stored_label = self.settings.load_image_size_filter()
+        for index in range(self.image_size_filter_box.count()):
+            if self.image_size_filter_box.itemText(index) == stored_label:
+                self.image_size_filter_box.setCurrentIndex(index)
+                return
 
     def apply_filter(self, text: str) -> None:
         if self._using_favorites_search():
@@ -638,11 +862,205 @@ class MainWindow(QMainWindow):
         self._apply_grid_filter(text)
 
     def _apply_grid_filter(self, text: str, show_status: bool = True) -> None:
-        self.grid.apply_filter(text, self.extension_filter_box.text(), self._size_filter_predicate())
+        self.grid.apply_filter(text, self.extension_filter_box.text(), self._combined_filter_predicate())
         self.request_visible_thumbnails()
         self.update_selected_info()
         if show_status:
             self.status_bar.showMessage(f"Found {self.grid.visible_count()} items")
+
+    def _prime_grid_filter_settings(self) -> None:
+        self.grid.apply_filter(
+            self.search_box.text(),
+            self.extension_filter_box.text(),
+            self._combined_filter_predicate(),
+        )
+
+    def _workflow_text_changed(self, _text: str) -> None:
+        if self.workflow_filter_checkbox.isChecked():
+            self.apply_filter(self.search_box.text())
+
+    def _combined_filter_predicate(self):
+        size_predicate = self._size_filter_predicate()
+        workflow_predicate = (
+            workflow_filter_predicate(self.naming_convention_box.text())
+            if self.workflow_filter_checkbox.isChecked()
+            else None
+        )
+        active_tag = self._active_tag_name()
+        duplicate_hidden_keys = self._duplicate_hidden_keys if self.hide_duplicates_checkbox.isChecked() else None
+        if (
+            size_predicate is None
+            and workflow_predicate is None
+            and duplicate_hidden_keys is None
+            and active_tag is None
+        ):
+            return None
+
+        def predicate(media_item) -> bool:
+            if duplicate_hidden_keys is not None and self._item_duplicate_key(media_item) in duplicate_hidden_keys:
+                return False
+            if active_tag is not None and not self._item_has_active_tag(media_item):
+                return False
+            if size_predicate is not None and not size_predicate(media_item):
+                return False
+            if workflow_predicate is not None and not workflow_predicate(media_item):
+                return False
+            return True
+
+        return predicate
+
+    def _active_tag_name(self) -> str | None:
+        tag_name = normalize_tag_name(self._selected_tag_filter)
+        if tag_name:
+            return tag_name
+        return None
+
+    def _tag_filter_changed(self) -> None:
+        tag_name = self.tag_filter_box.currentData()
+        self._selected_tag_filter = normalize_tag_name(tag_name if isinstance(tag_name, str) else "")
+        self.settings.save_active_tag_filter(self._selected_tag_filter)
+        self._rebuild_tag_filter_lookup()
+        self.apply_filter(self.search_box.text())
+
+    def refresh_tag_filter_options(self) -> None:
+        current_tag = self._active_tag_name()
+        tags = self._all_tags_for_current_context()
+        if current_tag and not any(tag_name.lower() == current_tag.lower() for tag_name in tags):
+            tags.append(current_tag)
+            tags.sort(key=str.lower)
+        self.tag_filter_box.blockSignals(True)
+        self.tag_filter_box.clear()
+        self.tag_filter_box.addItem(ANY_TAG_LABEL, None)
+        selected_index = 0
+        for tag_name in tags:
+            self.tag_filter_box.addItem(tag_name, tag_name)
+            if current_tag and tag_name.lower() == current_tag.lower():
+                selected_index = self.tag_filter_box.count() - 1
+        self.tag_filter_box.setCurrentIndex(selected_index)
+        self.tag_filter_box.blockSignals(False)
+        self._rebuild_tag_filter_lookup()
+
+    def _all_tags_for_current_context(self) -> list[str]:
+        tags: dict[str, str] = {}
+        for root in self._tag_roots_for_current_context(existing_only=True):
+            try:
+                for tag_name in TagStore(root).list_tags():
+                    normalized = normalize_tag_name(tag_name)
+                    if not normalized:
+                        continue
+                    tags.setdefault(normalized.lower(), normalized)
+            except OSError:
+                continue
+        return sorted(tags.values(), key=str.lower)
+
+    def _rebuild_tag_filter_lookup(self) -> None:
+        self._tag_filter_lookup = {}
+        self._tagged_item_keys = set()
+        tag_name = self._active_tag_name()
+        if tag_name is None:
+            return
+        for root in self._tag_roots_for_current_context(existing_only=True):
+            try:
+                tagged_paths = TagStore(root).tagged_paths(tag_name)
+            except OSError:
+                continue
+            if tagged_paths:
+                self._tag_filter_lookup[root.resolve()] = tagged_paths
+        self._rebuild_tagged_item_keys(self.items)
+
+    def _item_has_active_tag(self, item) -> bool:
+        return self._item_duplicate_key(item) in self._tagged_item_keys
+
+    def _rebuild_tagged_item_keys(self, items: list) -> None:
+        self._tagged_item_keys = set()
+        self._record_tagged_item_keys(items)
+
+    def _record_tagged_item_keys(self, items: list) -> None:
+        if not self._tag_filter_lookup:
+            return
+        tag_roots = list(self._tag_filter_lookup.items())
+        for item in items:
+            for root, tagged_paths in tag_roots:
+                relative_path = self._relative_item_path(item, root)
+                if relative_path is not None and relative_path in tagged_paths:
+                    self._tagged_item_keys.add(self._item_duplicate_key(item))
+                    break
+
+    def _tag_roots_for_current_context(self, existing_only: bool = False) -> list[Path]:
+        raw_roots = self._selected_favorites() if self._using_favorites_search() else []
+        if not raw_roots and self.current_root is not None:
+            raw_roots = [self.current_root]
+
+        roots: list[Path] = []
+        seen: set[Path] = set()
+        for root in raw_roots:
+            tag_root = self._tag_root_for_path(root, create=False) or root
+            resolved = tag_root.resolve()
+            if resolved in seen:
+                continue
+            if existing_only and not tag_database_exists(resolved):
+                continue
+            seen.add(resolved)
+            roots.append(resolved)
+        return roots
+
+    def _tag_root_for_item(self, item, create: bool) -> Path | None:
+        existing_root = find_library_cache_root(item.preview_path)
+        if existing_root is not None and (create or tag_database_exists(existing_root)):
+            return existing_root.resolve()
+
+        candidates: list[Path] = []
+        if self.current_root is not None:
+            candidates.append(self.current_root)
+        candidates.extend(self._selected_favorites())
+        for candidate in candidates:
+            resolved = candidate.resolve()
+            if self._relative_item_path(item, resolved) is not None:
+                if create or tag_database_exists(resolved):
+                    return resolved
+
+        return item.folder.resolve() if create else None
+
+    def _tag_root_for_path(self, path: Path, create: bool) -> Path | None:
+        existing_root = find_library_cache_root(path)
+        if existing_root is not None and (create or tag_database_exists(existing_root)):
+            return existing_root.resolve()
+        resolved = path.resolve()
+        if create or tag_database_exists(resolved):
+            return resolved
+        return None
+
+    def _relative_item_path(self, item, root: Path) -> str | None:
+        try:
+            return str(item.preview_path.relative_to(root)).replace("\\", "/")
+        except (OSError, ValueError):
+            try:
+                return str(item.preview_path.resolve().relative_to(root.resolve())).replace("\\", "/")
+            except (OSError, ValueError):
+                return None
+
+    def _reset_duplicate_filter_state(self) -> None:
+        self._duplicate_first_keys = {}
+        self._duplicate_hidden_keys = set()
+
+    def _rebuild_duplicate_filter_state(self, items: list) -> None:
+        self._reset_duplicate_filter_state()
+        self._record_duplicate_items(items)
+
+    def _record_duplicate_items(self, items: list) -> None:
+        for item in items:
+            name_key = self._duplicate_name_key(item)
+            item_key = self._item_duplicate_key(item)
+            if name_key in self._duplicate_first_keys:
+                self._duplicate_hidden_keys.add(item_key)
+                continue
+            self._duplicate_first_keys[name_key] = item_key
+
+    def _duplicate_name_key(self, item) -> str:
+        return Path(item.display_name).stem.lower()
+
+    def _item_duplicate_key(self, item) -> tuple[Path, str]:
+        return (item.preview_path, item.display_name)
 
     def _size_filter_predicate(self):
         selected = self.image_size_filter_box.currentData()
@@ -664,6 +1082,7 @@ class MainWindow(QMainWindow):
         return predicate
 
     def _favorites_search_toggled(self, checked: bool) -> None:
+        self.refresh_tag_filter_options()
         if checked:
             if not self._ensure_favorites_items():
                 return
@@ -736,6 +1155,7 @@ class MainWindow(QMainWindow):
         self._favorite_items = items
         self._favorite_index_signature = signature
         self._favorite_index_ready = True
+        self.refresh_tag_filter_options()
         if self._using_favorites_search() and signature == self._favorite_signature():
             self._show_items(self._favorite_items)
             self._apply_grid_filter(self.search_box.text(), show_status=False)
@@ -752,11 +1172,13 @@ class MainWindow(QMainWindow):
     def _restore_folder_items(self) -> None:
         self._show_items(self._folder_items)
 
-    def _show_items(self, items: list) -> None:
+    def _show_items(self, items: list, fast: bool = False) -> None:
         self._prefetch_timer.stop()
         self._reset_thumbnail_queue()
         self.items = items
-        self.grid.set_items(items)
+        self._rebuild_duplicate_filter_state(items)
+        self._rebuild_tagged_item_keys(items)
+        self.grid.set_items(items, batch_size=5000 if fast else None)
         self.update_selected_info()
 
     def seek_selected_item(self) -> None:
@@ -868,6 +1290,7 @@ class MainWindow(QMainWindow):
             self.folder_browser.set_favorites(self.favorites, self.favorite_search_enabled)
             self._favorite_index_ready = False
             self._favorite_index_signature = ()
+            self.refresh_tag_filter_options()
 
     def remove_favorite(self, path: Path) -> None:
         self.favorites = [favorite for favorite in self.favorites if favorite != path]
@@ -882,6 +1305,7 @@ class MainWindow(QMainWindow):
         ]
         self._favorite_index_ready = False
         self._favorite_index_signature = ()
+        self.refresh_tag_filter_options()
         if self._using_favorites_search():
             self.apply_filter(self.search_box.text())
 
@@ -893,6 +1317,7 @@ class MainWindow(QMainWindow):
         self.settings.save_favorites_search_enabled(list(self.favorite_search_enabled))
         self._favorite_index_ready = False
         self._favorite_index_signature = ()
+        self.refresh_tag_filter_options()
         if self._using_favorites_search():
             self.apply_filter(self.search_box.text())
 
@@ -998,7 +1423,7 @@ class MainWindow(QMainWindow):
     def open_associated_viewer(self, item) -> None:
         associated_items = self._associated_items_for(item)
         if not associated_items:
-            self.status_bar.showMessage("No associated textures found.")
+            self.status_bar.showMessage("No workflow textures found.")
             return
 
         current_index = 0
@@ -1007,12 +1432,12 @@ class MainWindow(QMainWindow):
                 current_index = index
                 break
 
-        self.status_bar.showMessage(f"Showing {len(associated_items)} associated texture(s).")
+        self.status_bar.showMessage(f"Showing {len(associated_items)} workflow texture(s).")
         self._show_selection_browser(
             associated_items,
             current_index,
-            "Associated Textures",
-            "associated texture(s)",
+            "Workflow Textures",
+            "workflow texture(s)",
         )
 
     def open_guess_viewer(self, item) -> None:
@@ -1035,6 +1460,43 @@ class MainWindow(QMainWindow):
             "guessed texture(s)",
         )
 
+    def open_material_set_viewer(self, item) -> None:
+        texture_set = texture_set_for_item(item, self.items)
+        if not texture_set.items:
+            self.status_bar.showMessage("No material set found.")
+            return
+
+        current_index = self._current_index_in_items(texture_set.items, item)
+        self.status_bar.showMessage(f"Showing {len(texture_set.items)} material set file(s).")
+        self._show_selection_browser(
+            texture_set.items,
+            current_index,
+            "Material Set",
+            "material set file(s)",
+        )
+
+    def open_texture_validation(self, item) -> None:
+        texture_set = texture_set_for_item(item, self.items)
+        issues = validate_texture_set(texture_set)
+        dialog = TextureSetValidationDialog(texture_set, issues, self)
+        self.status_bar.showMessage(f"Validated {len(texture_set.items)} material set file(s).")
+        self._show_tool_window(dialog)
+
+    def open_channel_inspector(self, item) -> None:
+        if item.is_video or item.is_model:
+            self.status_bar.showMessage("Channel inspector works on image textures.")
+            return
+
+        dialog = ChannelInspectorDialog(item, self)
+        self.status_bar.showMessage(f"Inspecting channels: {item.display_name}")
+        self._show_tool_window(dialog)
+
+    def _current_index_in_items(self, items: list, selected_item) -> int:
+        for index, media_item in enumerate(items):
+            if media_item.preview_path == selected_item.preview_path and media_item.display_name == selected_item.display_name:
+                return index
+        return 0
+
     def _show_selection_browser(
         self,
         items: list,
@@ -1053,6 +1515,7 @@ class MainWindow(QMainWindow):
             self,
             window_title,
             count_label,
+            self.naming_convention_box.text(),
         )
         browser.setModal(False)
         browser.setAttribute(Qt.WA_DeleteOnClose, True)
@@ -1063,6 +1526,21 @@ class MainWindow(QMainWindow):
     def _forget_selection_window(self, dialog: AssociatedBrowserDialog) -> None:
         if dialog in self._selection_windows:
             self._selection_windows.remove(dialog)
+
+    def _show_tool_window(self, dialog: QDialog) -> None:
+        while len(self._tool_windows) >= 6:
+            oldest = self._tool_windows.pop(0)
+            oldest.close()
+
+        dialog.setModal(False)
+        dialog.setAttribute(Qt.WA_DeleteOnClose, True)
+        dialog.destroyed.connect(lambda _object=None, window=dialog: self._forget_tool_window(window))
+        self._tool_windows.append(dialog)
+        dialog.show()
+
+    def _forget_tool_window(self, dialog: QDialog) -> None:
+        if dialog in self._tool_windows:
+            self._tool_windows.remove(dialog)
 
     def _associated_items_for(self, item) -> list:
         if item.is_video or item.is_model:
@@ -1335,13 +1813,21 @@ class MainWindow(QMainWindow):
         return self._normalize_role_token(role) == self._normalize_role_token(token)
 
     def _handle_population_progress(self, added_count: int, total_count: int) -> None:
-        if self.current_scan is None:
+        if self._loading_cached_folder:
+            self.status_bar.showMessage(f"Loading cached folder... {added_count}/{total_count}")
+        elif self.current_scan is None:
             self.status_bar.showMessage(f"Preparing items... {added_count}/{total_count}")
+        if self.current_scan is not None and added_count > 500:
+            return
         if added_count <= self.grid.total_count():
             self.request_visible_thumbnails()
 
     def _handle_population_finished(self, visible_count: int) -> None:
         self.request_visible_thumbnails()
+        if self._loading_cached_folder:
+            self._loading_cached_folder = False
+            self.status_bar.showMessage(f"Loaded cached folder. Found {visible_count} items")
+            return
         if self.current_scan is None:
             self.status_bar.showMessage(f"Found {visible_count} items")
 
@@ -1383,7 +1869,15 @@ def run() -> None:
     app.setWindowIcon(icon)
     app.setStyle("Fusion")
 
+    startup_screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
+    startup_splash = create_splash("Loading Texture Browser...", startup_screen)
+    if startup_splash is not None:
+        startup_splash.show()
+        app.processEvents()
+
     window = MainWindow()
     window.setWindowIcon(icon)
     window.show()
+    if startup_splash is not None:
+        QTimer.singleShot(3000, startup_splash.close)
     sys.exit(app.exec())

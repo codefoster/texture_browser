@@ -27,7 +27,7 @@ class NamingPresetDialog(QDialog):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Naming Presets")
+        self.setWindowTitle("Workflow Presets")
         self.resize(scale_px(620, self), scale_px(360, self))
 
         self.presets = dict(sorted(presets.items(), key=lambda item: item[0].lower()))
@@ -58,7 +58,7 @@ class NamingPresetDialog(QDialog):
         fields = QVBoxLayout()
         fields.addWidget(QLabel("Name"))
         fields.addWidget(self.name_box)
-        fields.addWidget(QLabel("Naming convention"))
+        fields.addWidget(QLabel("Workflow"))
         fields.addWidget(self.convention_box)
         fields.addStretch(1)
 

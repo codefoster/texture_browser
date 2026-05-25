@@ -28,6 +28,12 @@ class ThumbnailGrid(QListWidget):
     filesDropped = Signal(list)
     associatedRequested = Signal(MediaItem)
     guessRequested = Signal(MediaItem)
+    materialSetRequested = Signal(MediaItem)
+    validationRequested = Signal(MediaItem)
+    channelInspectorRequested = Signal(MediaItem)
+    tagFileRequested = Signal(MediaItem)
+    tagMaterialSetRequested = Signal(MediaItem)
+    removeTagRequested = Signal(MediaItem)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -36,9 +42,11 @@ class ThumbnailGrid(QListWidget):
         self._thumb_size = 160
         self._loaded_paths: set[Path] = set()
         self._prefetch_chunk_size = 100
-        self._populate_batch_size = 250
+        self._populate_batch_size = 1000
+        self._active_populate_batch_size = self._populate_batch_size
         self._pending_items: list[MediaItem] = []
         self._added_count = 0
+        self._placeholder_icons: dict[tuple[str, int, bool], QIcon] = {}
         self._filter_query = ""
         self._filter_terms: list[str] = []
         self._extension_filters: set[str] = set()
@@ -77,21 +85,26 @@ class ThumbnailGrid(QListWidget):
     def set_thumbnail_size(self, size: int) -> None:
         self._thumb_size = size
         self._loaded_paths.clear()
+        self._placeholder_icons.clear()
         self._apply_size()
         size_hint = self._item_size_hint()
-        for row in range(self.count()):
-            item = self.item(row)
-            media_item = item.data(Qt.UserRole)
-            item.setSizeHint(size_hint)
-            placeholder = build_placeholder(media_item.extension or "file", self._thumb_size, media_item.is_video)
-            item.setIcon(QIcon(placeholder))
+        self.setUpdatesEnabled(False)
+        try:
+            for row in range(self.count()):
+                item = self.item(row)
+                media_item = item.data(Qt.UserRole)
+                item.setSizeHint(size_hint)
+                item.setIcon(self._placeholder_icon(media_item))
+        finally:
+            self.setUpdatesEnabled(True)
         self.doItemsLayout()
         self.updateGeometries()
         self.viewport().update()
         self.schedule_visible_refresh()
 
-    def set_items(self, items: list[MediaItem]) -> None:
+    def set_items(self, items: list[MediaItem], batch_size: int | None = None) -> None:
         self.reset_grid_state()
+        self._active_populate_batch_size = batch_size or self._populate_batch_size
         self._items = items
         self._pending_items = list(items)
         self._added_count = 0
@@ -116,6 +129,7 @@ class ThumbnailGrid(QListWidget):
         self._pending_items = []
         self._added_count = 0
         self._visible_count = 0
+        self._active_populate_batch_size = self._populate_batch_size
 
     def apply_filter(self, text: str, extension_filter: str = "", extra_filter=None) -> None:
         query = text.strip().lower()
@@ -124,13 +138,18 @@ class ThumbnailGrid(QListWidget):
         self._extension_filters = self._parse_extension_filters(extension_filter)
         self._extra_filter = extra_filter
         visible_count = 0
-        for row in range(self.count()):
-            item = self.item(row)
-            media_item = item.data(Qt.UserRole)
-            hidden = self._is_hidden_by_filter(media_item)
-            item.setHidden(hidden)
-            if not hidden:
-                visible_count += 1
+        self.setUpdatesEnabled(False)
+        try:
+            for row in range(self.count()):
+                item = self.item(row)
+                media_item = item.data(Qt.UserRole)
+                hidden = self._is_hidden_by_filter(media_item)
+                if item.isHidden() != hidden:
+                    item.setHidden(hidden)
+                if not hidden:
+                    visible_count += 1
+        finally:
+            self.setUpdatesEnabled(True)
         self._visible_count = visible_count
         self.schedule_visible_refresh()
 
@@ -201,6 +220,20 @@ class ThumbnailGrid(QListWidget):
             if item.isHidden():
                 continue
             items.append(item.data(Qt.UserRole))
+        return items
+
+    def selected_media_items(self) -> list[MediaItem]:
+        items: list[MediaItem] = []
+        seen: set[tuple[Path, str]] = set()
+        for widget_item in self.selectedItems():
+            media_item = widget_item.data(Qt.UserRole)
+            if media_item is None:
+                continue
+            key = (media_item.preview_path, media_item.display_name)
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append(media_item)
         return items
 
     def index_of_item(self, target: MediaItem) -> int:
@@ -275,14 +308,26 @@ class ThumbnailGrid(QListWidget):
         media_item = item.data(Qt.UserRole)
 
         menu = QMenu(self)
-        associated_action = QAction("Select associated", self)
+        associated_action = QAction("Select workflow", self)
         guess_action = QAction("Guess", self)
+        material_set_action = QAction("Material set", self)
+        validate_action = QAction("Validate texture set", self)
+        channel_action = QAction("Channel inspector", self)
+        tag_file_action = QAction("Tag file...", self)
+        tag_material_set_action = QAction("Tag material set...", self)
+        remove_tag_action = QAction("Remove tag...", self)
         open_action = QAction("Open file location", self)
         copy_file_action = QAction("Copy file path", self)
         copy_folder_action = QAction("Copy folder path", self)
 
         associated_action.triggered.connect(lambda: self.associatedRequested.emit(media_item))
         guess_action.triggered.connect(lambda: self.guessRequested.emit(media_item))
+        material_set_action.triggered.connect(lambda: self.materialSetRequested.emit(media_item))
+        validate_action.triggered.connect(lambda: self.validationRequested.emit(media_item))
+        channel_action.triggered.connect(lambda: self.channelInspectorRequested.emit(media_item))
+        tag_file_action.triggered.connect(lambda: self.tagFileRequested.emit(media_item))
+        tag_material_set_action.triggered.connect(lambda: self.tagMaterialSetRequested.emit(media_item))
+        remove_tag_action.triggered.connect(lambda: self.removeTagRequested.emit(media_item))
         open_action.triggered.connect(lambda: open_in_explorer(media_item.preview_path))
         copy_file_action.triggered.connect(
             lambda: QApplication.clipboard().setText(str(media_item.preview_path))
@@ -293,6 +338,13 @@ class ThumbnailGrid(QListWidget):
 
         menu.addAction(associated_action)
         menu.addAction(guess_action)
+        menu.addAction(material_set_action)
+        menu.addAction(validate_action)
+        menu.addAction(channel_action)
+        menu.addSeparator()
+        menu.addAction(tag_file_action)
+        menu.addAction(tag_material_set_action)
+        menu.addAction(remove_tag_action)
         menu.addSeparator()
         menu.addAction(open_action)
         menu.addAction(copy_file_action)
@@ -308,27 +360,40 @@ class ThumbnailGrid(QListWidget):
             self.schedule_visible_refresh()
             return
 
-        batch = self._pending_items[: self._populate_batch_size]
-        del self._pending_items[: self._populate_batch_size]
+        batch_size = self._active_populate_batch_size
+        batch = self._pending_items[:batch_size]
+        del self._pending_items[:batch_size]
 
-        for media_item in batch:
-            widget_item = QListWidgetItem()
-            widget_item.setText(self._display_label(media_item.display_name))
-            widget_item.setData(Qt.UserRole, media_item)
-            widget_item.setToolTip(f"{media_item.display_name}\n{format_type_label(media_item)}")
-            widget_item.setSizeHint(self._item_size_hint())
-            placeholder = build_placeholder(media_item.extension or "file", self._thumb_size, media_item.is_video)
-            widget_item.setIcon(QIcon(placeholder))
-            hidden = self._is_hidden_by_filter(media_item)
-            self.addItem(widget_item)
-            widget_item.setHidden(hidden)
-            if not hidden:
-                self._visible_count += 1
-            self._item_map[media_item.preview_path] = widget_item
+        size_hint = self._item_size_hint()
+        self.setUpdatesEnabled(False)
+        try:
+            for media_item in batch:
+                widget_item = QListWidgetItem()
+                widget_item.setText(self._display_label(media_item.display_name))
+                widget_item.setData(Qt.UserRole, media_item)
+                widget_item.setToolTip(f"{media_item.display_name}\n{format_type_label(media_item)}")
+                widget_item.setSizeHint(size_hint)
+                widget_item.setIcon(self._placeholder_icon(media_item))
+                hidden = self._is_hidden_by_filter(media_item)
+                self.addItem(widget_item)
+                widget_item.setHidden(hidden)
+                if not hidden:
+                    self._visible_count += 1
+                self._item_map[media_item.preview_path] = widget_item
+        finally:
+            self.setUpdatesEnabled(True)
 
         self._added_count += len(batch)
         self.populationProgress.emit(self._added_count, len(self._items))
         self._populate_timer.start()
+
+    def _placeholder_icon(self, media_item: MediaItem) -> QIcon:
+        key = (media_item.extension or "file", self._thumb_size, media_item.is_video)
+        icon = self._placeholder_icons.get(key)
+        if icon is None:
+            icon = QIcon(build_placeholder(key[0], key[1], key[2]))
+            self._placeholder_icons[key] = icon
+        return icon
 
     def _visible_row_indexes(self) -> list[int]:
         viewport_rect = self.viewport().rect()
@@ -365,13 +430,20 @@ class ThumbnailGrid(QListWidget):
         return items
 
     def _is_hidden_by_filter(self, media_item: MediaItem) -> bool:
-        missing_required_term = any(term not in media_item.search_text for term in self._filter_terms)
+        filename_search_text = self._filename_search_text(media_item)
+        missing_required_term = any(term not in filename_search_text for term in self._filter_terms)
         if self._extension_filters:
             extension_hidden = media_item.extension not in self._extension_filters
         else:
             extension_hidden = media_item.is_video or media_item.is_model
         extra_hidden = self._extra_filter is not None and not self._extra_filter(media_item)
         return missing_required_term or extension_hidden or extra_hidden
+
+    def _filename_search_text(self, media_item: MediaItem) -> str:
+        parts = [media_item.display_name, media_item.preview_path.name]
+        if media_item.sequence:
+            parts.append(media_item.sequence.pattern_name)
+        return " ".join(part.lower() for part in parts if part)
 
     def _parse_extension_filters(self, text: str) -> set[str]:
         extensions: set[str] = set()
