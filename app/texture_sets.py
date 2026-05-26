@@ -4,8 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 
-from PySide6.QtGui import QImageReader
-
+from app.media_dimensions import media_dimensions
 from app.models import MediaItem
 
 
@@ -285,21 +284,7 @@ def role_sort_index(role: str | None) -> int:
 
 
 def image_dimensions(item: MediaItem) -> tuple[int, int] | None:
-    cached = item.metadata.get("dimensions")
-    if isinstance(cached, str) and "x" in cached:
-        try:
-            width_text, height_text = cached.split("x", 1)
-            return (int(width_text), int(height_text))
-        except ValueError:
-            pass
-
-    reader = QImageReader(str(item.preview_path))
-    size = reader.size()
-    if not size.isValid():
-        return None
-    dimensions = (size.width(), size.height())
-    item.metadata["dimensions"] = f"{dimensions[0]}x{dimensions[1]}"
-    return dimensions
+    return media_dimensions(item.preview_path, item.metadata)
 
 
 def _identity_token_matches(left: str, right: str) -> bool:

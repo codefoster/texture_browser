@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QThreadPool, Qt, QTimer
-from PySide6.QtGui import QCursor, QGuiApplication, QIcon, QImageReader, QPixmap
+from PySide6.QtGui import QCursor, QGuiApplication, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QListWidget,
     QSplashScreen,
     QSplitter,
     QStatusBar,
@@ -38,9 +39,11 @@ from app.channel_inspector import ChannelInspectorDialog
 from app.favorites import FavoritesStore
 from app.favorites_index import FavoritesIndexStore, FavoritesIndexWorker
 from app.folder_tree import FolderBrowser
+from app.media_dimensions import media_dimensions
 from app.models import THUMBNAIL_DIMENSIONS, ThumbnailSize
 from app.naming_presets import NamingPresetDialog
 from app.scanner import ScanWorker
+from app.size_filter_worker import SizeFilterWorker
 from app.tag_store import TagStore, normalize_tag_name, tag_database_exists
 from app.thumbnail_grid import ThumbnailGrid
 from app.thumbnailer import ThumbnailWorker
@@ -209,7 +212,13 @@ def app_icon() -> QIcon:
 
 
 def app_splash_pixmap() -> QPixmap:
-    pixmap = QPixmap(str(resource_path("assets/AB_Splash_01.png")))
+    pixmap = QPixmap(
+        str(
+            resource_path(
+                "assets/stollnation_cool_logo_for_a_program_called_Texture_Browser_ju_6450916f-8510-416e-ab27-ceb00f104fbc_0.png"
+            )
+        )
+    )
     if pixmap.isNull():
         return pixmap
     return pixmap.scaled(720, 405, Qt.KeepAspectRatio, Qt.SmoothTransformation)
@@ -252,6 +261,8 @@ class MainWindow(QMainWindow):
         self.cache_pool.setMaxThreadCount(1)
         self.index_pool = QThreadPool(self)
         self.index_pool.setMaxThreadCount(1)
+        self.size_pool = QThreadPool(self)
+        self.size_pool.setMaxThreadCount(1)
         self.thumbnail_pool = QThreadPool(self)
         self.thumbnail_pool.setMaxThreadCount(min(8, max(4, os.cpu_count() or 4)))
         self.settings = FavoritesStore()
@@ -259,6 +270,7 @@ class MainWindow(QMainWindow):
         self.current_scan: ScanWorker | None = None
         self.current_cache: CacheWorker | None = None
         self.current_favorites_index: FavoritesIndexWorker | None = None
+        self.current_size_filter: SizeFilterWorker | None = None
         self.current_root: Path | None = None
         self._queued_folder: Path | None = None
         self.sequence_grouping_enabled = self.settings.load_sequence_grouping_enabled()
@@ -281,6 +293,8 @@ class MainWindow(QMainWindow):
         self._selection_windows: list[AssociatedBrowserDialog] = []
         self._tool_windows: list[QDialog] = []
         self._scan_splash: QSplashScreen | None = None
+        self._size_filter_token = 0
+        self._size_filter_pending = False
         self._prefetch_timer = QTimer(self)
         self._prefetch_timer.setSingleShot(True)
         self._prefetch_timer.setInterval(80)
@@ -294,7 +308,7 @@ class MainWindow(QMainWindow):
         self.folder_browser.favoriteSearchToggled.connect(self.set_favorite_search_enabled)
 
         self.search_box = QLineEdit()
-        self.search_box.setPlaceholderText("Search, or paste a folder/file path and press Enter...")
+        self.search_box.setPlaceholderText("Search files. Use commas for alternatives, or paste a folder/file path and press Enter...")
         self.search_box.textChanged.connect(self.apply_filter)
         self.search_box.returnPressed.connect(self.browse_to_search_path)
         self.favorites_search_checkbox = QCheckBox("Favorites")
@@ -358,8 +372,9 @@ class MainWindow(QMainWindow):
         self.tag_filter_box.setMinimumWidth(scale_px(132, self))
         self.tag_filter_box.currentIndexChanged.connect(lambda _index: self._tag_filter_changed())
         size_bar.addSpacing(18)
-        self.tag_filter_label = self._section_label("Tag")
-        size_bar.addWidget(self.tag_filter_label)
+        self.tag_manager_button = self._section_button("Tag")
+        self.tag_manager_button.clicked.connect(self.open_tag_manager)
+        size_bar.addWidget(self.tag_manager_button)
         size_bar.addWidget(self.tag_filter_box)
         self.naming_convention_box = QLineEdit()
         self.naming_convention_box.setPlaceholderText("metallic, albedo, roughness, normal")
@@ -503,6 +518,16 @@ class MainWindow(QMainWindow):
         label.setStyleSheet("QLabel { color: #5ea7ff; font-weight: 600; }")
         return label
 
+    def _section_button(self, text: str) -> QPushButton:
+        button = QPushButton(text)
+        button.setFlat(True)
+        button.setCursor(Qt.PointingHandCursor)
+        button.setStyleSheet(
+            "QPushButton { color: #5ea7ff; font-weight: 600; border: none; background: transparent; padding: 0px; }"
+            "QPushButton:hover { color: #7bb8ff; }"
+        )
+        return button
+
     def select_folder(self, path: Path) -> None:
         if not path.exists():
             return
@@ -587,6 +612,7 @@ class MainWindow(QMainWindow):
         if self.current_cache is not None:
             self.current_cache.cancel()
             self.current_cache = None
+        self._cancel_size_filter_worker()
 
     def cancel_scan_from_ui(self) -> None:
         self._queued_folder = None
@@ -817,15 +843,109 @@ class MainWindow(QMainWindow):
             grouped.setdefault(root, []).append(item)
         return grouped
 
+    def open_tag_manager(self) -> None:
+        roots = self._tag_roots_for_manager()
+        if not roots:
+            self.status_bar.showMessage("Select a folder or favorite library first.")
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Manage Tags")
+        dialog.resize(scale_px(360, self), scale_px(420, self))
+        layout = QVBoxLayout(dialog)
+
+        tag_list = QListWidget(dialog)
+        layout.addWidget(tag_list, 1)
+
+        buttons_row = QHBoxLayout()
+        add_button = QPushButton("Add Tag", dialog)
+        delete_button = QPushButton("Delete Tag", dialog)
+        close_button = QPushButton("Close", dialog)
+        buttons_row.addWidget(add_button)
+        buttons_row.addWidget(delete_button)
+        buttons_row.addStretch(1)
+        buttons_row.addWidget(close_button)
+        layout.addLayout(buttons_row)
+
+        def refresh_list() -> None:
+            current_name = tag_list.currentItem().text() if tag_list.currentItem() is not None else ""
+            tag_list.clear()
+            for tag_name in self._all_tags_for_roots(roots):
+                tag_list.addItem(tag_name)
+            if current_name:
+                for row in range(tag_list.count()):
+                    item = tag_list.item(row)
+                    if item is not None and item.text().lower() == current_name.lower():
+                        tag_list.setCurrentRow(row)
+                        break
+
+        def add_tag() -> None:
+            tag_name = self._prompt_for_tag("Add Tag")
+            if not tag_name:
+                return
+            created = False
+            for root in roots:
+                created = TagStore(root).create_tag(tag_name) or created
+            if not created:
+                return
+            self.refresh_tag_filter_options()
+            refresh_list()
+            self.status_bar.showMessage(f"Added tag {tag_name}.")
+
+        def delete_tag() -> None:
+            current_item = tag_list.currentItem()
+            if current_item is None:
+                self.status_bar.showMessage("Select a tag to delete.")
+                return
+            tag_name = normalize_tag_name(current_item.text())
+            if not tag_name:
+                return
+            removed = 0
+            for root in roots:
+                if tag_database_exists(root):
+                    removed += TagStore(root).delete_tag(tag_name)
+            if self._active_tag_name() and self._active_tag_name().lower() == tag_name.lower():
+                self._selected_tag_filter = ""
+                self.settings.save_active_tag_filter("")
+            self.refresh_tag_filter_options()
+            self.apply_filter(self.search_box.text())
+            refresh_list()
+            self.status_bar.showMessage(f"Deleted tag {tag_name}.")
+
+        add_button.clicked.connect(add_tag)
+        delete_button.clicked.connect(delete_tag)
+        close_button.clicked.connect(dialog.accept)
+        refresh_list()
+        dialog.exec()
+
     def _prompt_for_tag(self, title: str) -> str:
-        tags = self._all_tags_for_current_context()
-        if tags:
-            tag_name, ok = QInputDialog.getItem(self, title, "Tag", tags, 0, True)
-        else:
-            tag_name, ok = QInputDialog.getText(self, title, "Tag")
-        if not ok:
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+        layout = QVBoxLayout(dialog)
+        combo = QComboBox(dialog)
+        combo.setEditable(True)
+        combo.setMinimumWidth(scale_px(260, self))
+        combo.addItems(self._all_known_tags())
+        if combo.lineEdit() is not None:
+            combo.lineEdit().setPlaceholderText("Select or type a tag")
+        layout.addWidget(combo)
+
+        buttons_row = QHBoxLayout()
+        ok_button = QPushButton("OK", dialog)
+        cancel_button = QPushButton("Cancel", dialog)
+        buttons_row.addStretch(1)
+        buttons_row.addWidget(ok_button)
+        buttons_row.addWidget(cancel_button)
+        layout.addLayout(buttons_row)
+
+        ok_button.clicked.connect(dialog.accept)
+        cancel_button.clicked.connect(dialog.reject)
+        combo.setFocus()
+        combo.showPopup()
+
+        if dialog.exec() != QDialog.Accepted:
             return ""
-        return normalize_tag_name(tag_name)
+        return normalize_tag_name(combo.currentText())
 
     def open_naming_presets(self) -> None:
         dialog = NamingPresetDialog(
@@ -853,12 +973,75 @@ class MainWindow(QMainWindow):
                 self.image_size_filter_box.setCurrentIndex(index)
                 return
 
+    def _ensure_size_filter_dimensions(self) -> None:
+        selected = self.image_size_filter_box.currentData()
+        if selected is None:
+            self._cancel_size_filter_worker()
+            self._size_filter_pending = False
+            return
+
+        missing_items = [
+            item
+            for item in self.items
+            if not item.is_video
+            and not item.is_model
+            and "dimensions" not in item.metadata
+            and item.metadata.get("dimensions_error") != "1"
+        ]
+        if not missing_items:
+            self._size_filter_pending = False
+            return
+        if self.current_size_filter is not None:
+            return
+
+        self._size_filter_token += 1
+        token = self._size_filter_token
+        worker = SizeFilterWorker(token, missing_items)
+        worker.signals.progress.connect(self.status_bar.showMessage)
+        worker.signals.finished.connect(self._size_filter_finished)
+        worker.signals.error.connect(self._size_filter_failed)
+        self.current_size_filter = worker
+        self._size_filter_pending = True
+        self.status_bar.showMessage(f"Reading image sizes... 0/{len(missing_items)}")
+        self.size_pool.start(worker)
+
+    def _cancel_size_filter_worker(self) -> None:
+        self._size_filter_token += 1
+        if self.current_size_filter is not None:
+            self.current_size_filter.cancel()
+            self.current_size_filter = None
+
+    def _size_filter_finished(self, token: int, dimensions_by_path: dict, failed_paths: list) -> None:
+        if token != self._size_filter_token:
+            return
+        self.current_size_filter = None
+        failed = set(failed_paths)
+        for item in self.items:
+            path_key = str(item.preview_path)
+            dimensions = dimensions_by_path.get(path_key)
+            if dimensions is not None:
+                item.metadata["dimensions"] = dimensions
+                item.metadata.pop("dimensions_error", None)
+            elif path_key in failed:
+                item.metadata["dimensions_error"] = "1"
+        self._size_filter_pending = False
+        self._apply_grid_filter(self.search_box.text())
+        self.status_bar.showMessage(f"Found {self.grid.visible_count()} items")
+
+    def _size_filter_failed(self, token: int, message: str) -> None:
+        if token != self._size_filter_token:
+            return
+        self.current_size_filter = None
+        self._size_filter_pending = False
+        self.status_bar.showMessage(f"Image size filter failed: {message}")
+
     def apply_filter(self, text: str) -> None:
         if self._using_favorites_search():
             if not self._ensure_favorites_items():
                 return
         elif self.items is not self._folder_items:
             self._restore_folder_items()
+        self._ensure_size_filter_dimensions()
         self._apply_grid_filter(text)
 
     def _apply_grid_filter(self, text: str, show_status: bool = True) -> None:
@@ -941,8 +1124,35 @@ class MainWindow(QMainWindow):
         self._rebuild_tag_filter_lookup()
 
     def _all_tags_for_current_context(self) -> list[str]:
-        tags: dict[str, str] = {}
+        return self._all_tags_for_roots(self._tag_roots_for_current_context(existing_only=True))
+
+    def _all_known_tags(self) -> list[str]:
+        roots: list[Path] = []
+        seen: set[Path] = set()
         for root in self._tag_roots_for_current_context(existing_only=True):
+            if root not in seen:
+                seen.add(root)
+                roots.append(root)
+        for favorite in self.favorites:
+            root = self._tag_root_for_path(favorite, create=False)
+            if root is None:
+                continue
+            resolved = root.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            roots.append(resolved)
+        if self.current_root is not None:
+            root = self._tag_root_for_path(self.current_root, create=False)
+            if root is not None:
+                resolved = root.resolve()
+                if resolved not in seen:
+                    roots.append(resolved)
+        return self._all_tags_for_roots(roots)
+
+    def _all_tags_for_roots(self, roots: list[Path]) -> list[str]:
+        tags: dict[str, str] = {}
+        for root in roots:
             try:
                 for tag_name in TagStore(root).list_tags():
                     normalized = normalize_tag_name(tag_name)
@@ -1003,6 +1213,14 @@ class MainWindow(QMainWindow):
             seen.add(resolved)
             roots.append(resolved)
         return roots
+
+    def _tag_roots_for_manager(self) -> list[Path]:
+        roots = self._tag_roots_for_current_context(existing_only=False)
+        if roots:
+            return roots
+        if self.current_root is not None:
+            return [self.current_root.resolve()]
+        return []
 
     def _tag_root_for_item(self, item, create: bool) -> Path | None:
         existing_root = find_library_cache_root(item.preview_path)
@@ -1070,9 +1288,9 @@ class MainWindow(QMainWindow):
         def predicate(media_item) -> bool:
             if media_item.is_video or media_item.is_model:
                 return False
-            dimensions = self._image_dimensions_for_item(media_item)
+            dimensions = self._cached_image_dimensions_for_item(media_item)
             if dimensions is None:
-                return False
+                return self._size_filter_pending and media_item.metadata.get("dimensions_error") != "1"
             longest_side = max(dimensions)
             mode, limit = selected
             if mode == "min":
@@ -1080,6 +1298,16 @@ class MainWindow(QMainWindow):
             return longest_side <= int(limit)
 
         return predicate
+
+    def _cached_image_dimensions_for_item(self, item) -> tuple[int, int] | None:
+        cached = item.metadata.get("dimensions")
+        if isinstance(cached, str) and "x" in cached:
+            try:
+                width_text, height_text = cached.split("x", 1)
+                return (int(width_text), int(height_text))
+            except ValueError:
+                return None
+        return None
 
     def _favorites_search_toggled(self, checked: bool) -> None:
         self.refresh_tag_filter_options()
@@ -1175,6 +1403,8 @@ class MainWindow(QMainWindow):
     def _show_items(self, items: list, fast: bool = False) -> None:
         self._prefetch_timer.stop()
         self._reset_thumbnail_queue()
+        self._cancel_size_filter_worker()
+        self._size_filter_pending = False
         self.items = items
         self._rebuild_duplicate_filter_state(items)
         self._rebuild_tagged_item_keys(items)
@@ -1234,28 +1464,13 @@ class MainWindow(QMainWindow):
         self.info_label.setText(f"{item.display_name}    " + "    |    ".join(info_parts))
 
     def _image_dimensions_for_item(self, item) -> tuple[int, int] | None:
-        cached = item.metadata.get("dimensions")
-        if isinstance(cached, str) and "x" in cached:
-            try:
-                width_text, height_text = cached.split("x", 1)
-                return (int(width_text), int(height_text))
-            except ValueError:
-                pass
-
-        reader = QImageReader(str(item.preview_path))
-        size = reader.size()
-        if not size.isValid():
-            return None
-        dimensions = (size.width(), size.height())
-        item.metadata["dimensions"] = f"{dimensions[0]}x{dimensions[1]}"
-        return dimensions
+        return media_dimensions(item.preview_path, item.metadata)
 
     def _image_dimensions_label(self, path: Path) -> str:
-        reader = QImageReader(str(path))
-        size = reader.size()
-        if not size.isValid():
+        dimensions = media_dimensions(path)
+        if dimensions is None:
             return ""
-        return f"{size.width()} x {size.height()} px"
+        return f"{dimensions[0]} x {dimensions[1]} px"
 
     def _file_size_label(self, path: Path) -> str:
         try:

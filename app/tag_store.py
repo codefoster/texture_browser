@@ -34,6 +34,27 @@ class TagStore:
             rows = connection.execute("select name from tags order by lower(name)").fetchall()
         return [str(row[0]) for row in rows]
 
+    def create_tag(self, tag_name: str) -> bool:
+        tag_name = normalize_tag_name(tag_name)
+        if not tag_name:
+            return False
+        with self._connect() as connection:
+            self._tag_id(connection, tag_name)
+        return True
+
+    def delete_tag(self, tag_name: str) -> int:
+        tag_name = normalize_tag_name(tag_name)
+        if not tag_name:
+            return 0
+        with self._connect() as connection:
+            row = connection.execute("select id from tags where lower(name) = lower(?)", (tag_name,)).fetchone()
+            if row is None:
+                return 0
+            tag_id = int(row[0])
+            connection.execute("delete from tagged_files where tag_id = ?", (tag_id,))
+            connection.execute("delete from tags where id = ?", (tag_id,))
+            return connection.total_changes
+
     def add_items(self, tag_name: str, items: list[MediaItem], scope: str = "file", set_key: str = "") -> int:
         tag_name = normalize_tag_name(tag_name)
         if not tag_name:

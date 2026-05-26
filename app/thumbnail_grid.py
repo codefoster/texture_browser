@@ -48,7 +48,7 @@ class ThumbnailGrid(QListWidget):
         self._added_count = 0
         self._placeholder_icons: dict[tuple[str, int, bool], QIcon] = {}
         self._filter_query = ""
-        self._filter_terms: list[str] = []
+        self._filter_groups: list[list[str]] = []
         self._extension_filters: set[str] = set()
         self._extra_filter = None
         self._visible_count = 0
@@ -134,7 +134,7 @@ class ThumbnailGrid(QListWidget):
     def apply_filter(self, text: str, extension_filter: str = "", extra_filter=None) -> None:
         query = text.strip().lower()
         self._filter_query = query
-        self._filter_terms = [term.strip() for term in query.split(",") if term.strip()]
+        self._filter_groups = self._parse_filter_groups(query)
         self._extension_filters = self._parse_extension_filters(extension_filter)
         self._extra_filter = extra_filter
         visible_count = 0
@@ -431,19 +431,35 @@ class ThumbnailGrid(QListWidget):
 
     def _is_hidden_by_filter(self, media_item: MediaItem) -> bool:
         filename_search_text = self._filename_search_text(media_item)
-        missing_required_term = any(term not in filename_search_text for term in self._filter_terms)
+        matches_query = self._matches_filter_groups(filename_search_text)
         if self._extension_filters:
             extension_hidden = media_item.extension not in self._extension_filters
         else:
             extension_hidden = media_item.is_video or media_item.is_model
         extra_hidden = self._extra_filter is not None and not self._extra_filter(media_item)
-        return missing_required_term or extension_hidden or extra_hidden
+        return (not matches_query) or extension_hidden or extra_hidden
 
     def _filename_search_text(self, media_item: MediaItem) -> str:
         parts = [media_item.display_name, media_item.preview_path.name]
         if media_item.sequence:
             parts.append(media_item.sequence.pattern_name)
         return " ".join(part.lower() for part in parts if part)
+
+    def _parse_filter_groups(self, query: str) -> list[list[str]]:
+        groups: list[list[str]] = []
+        for raw_group in query.split(","):
+            tokens = re.findall(r"[a-z0-9]+", raw_group.lower())
+            if tokens:
+                groups.append(tokens)
+        return groups
+
+    def _matches_filter_groups(self, filename_search_text: str) -> bool:
+        if not self._filter_groups:
+            return True
+        for group in self._filter_groups:
+            if all(token in filename_search_text for token in group):
+                return True
+        return False
 
     def _parse_extension_filters(self, text: str) -> set[str]:
         extensions: set[str] = set()
