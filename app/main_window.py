@@ -44,6 +44,7 @@ from app.models import THUMBNAIL_DIMENSIONS, ThumbnailSize
 from app.naming_presets import NamingPresetDialog
 from app.scanner import ScanWorker
 from app.size_filter_worker import SizeFilterWorker
+from app.tag_csv_exporter import TagCsvExportWorker
 from app.tag_store import TagStore, normalize_tag_name, tag_database_exists
 from app.thumbnail_grid import ThumbnailGrid
 from app.thumbnailer import ThumbnailWorker
@@ -263,6 +264,8 @@ class MainWindow(QMainWindow):
         self.index_pool.setMaxThreadCount(1)
         self.size_pool = QThreadPool(self)
         self.size_pool.setMaxThreadCount(1)
+        self.export_pool = QThreadPool(self)
+        self.export_pool.setMaxThreadCount(1)
         self.thumbnail_pool = QThreadPool(self)
         self.thumbnail_pool.setMaxThreadCount(min(8, max(4, os.cpu_count() or 4)))
         self.settings = FavoritesStore()
@@ -271,6 +274,7 @@ class MainWindow(QMainWindow):
         self.current_cache: CacheWorker | None = None
         self.current_favorites_index: FavoritesIndexWorker | None = None
         self.current_size_filter: SizeFilterWorker | None = None
+        self.current_tag_export: TagCsvExportWorker | None = None
         self.current_root: Path | None = None
         self._queued_folder: Path | None = None
         self.sequence_grouping_enabled = self.settings.load_sequence_grouping_enabled()
@@ -376,6 +380,9 @@ class MainWindow(QMainWindow):
         self.tag_manager_button.clicked.connect(self.open_tag_manager)
         size_bar.addWidget(self.tag_manager_button)
         size_bar.addWidget(self.tag_filter_box)
+        self.export_tag_csv_button = QPushButton("Export CSV")
+        self.export_tag_csv_button.clicked.connect(self.export_tag_csv)
+        size_bar.addWidget(self.export_tag_csv_button)
         self.naming_convention_box = QLineEdit()
         self.naming_convention_box.setPlaceholderText("metallic, albedo, roughness, normal")
         self.naming_convention_box.setMinimumWidth(scale_px(280, self))
@@ -796,6 +803,39 @@ class MainWindow(QMainWindow):
         self.apply_filter(self.search_box.text())
         self.status_bar.showMessage(f"Tagged {tagged_count} material set file(s) with {tag_name}.")
 
+    def export_tag_csv(self) -> None:
+        tag_name = self._active_tag_name()
+        if tag_name is None:
+            self.status_bar.showMessage("Choose a tag first, then export CSV.")
+            return
+        roots = self._tag_roots_for_current_context(existing_only=True)
+        if not roots:
+            self.status_bar.showMessage("No tagged library roots are available for this export.")
+            return
+        if self.current_tag_export is not None:
+            self.status_bar.showMessage("A tag CSV export is already running.")
+            return
+
+        default_root = self.current_root or roots[0]
+        default_name = re.sub(r"[^A-Za-z0-9._-]+", "_", tag_name) or "tag_export"
+        default_path = default_root / f"{default_name}_materials.csv"
+        file_path, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Export Tag CSV",
+            str(default_path),
+            "CSV Files (*.csv)",
+        )
+        if not file_path:
+            return
+
+        worker = TagCsvExportWorker(roots, tag_name, Path(file_path))
+        worker.signals.progress.connect(self.status_bar.showMessage)
+        worker.signals.finished.connect(self._tag_csv_export_finished)
+        worker.signals.error.connect(self._tag_csv_export_failed)
+        self.current_tag_export = worker
+        self.status_bar.showMessage(f"Exporting CSV for tag {tag_name}...")
+        self.export_pool.start(worker)
+
     def remove_tag_from_item(self, item) -> None:
         selected_items = self._selected_items_for_action(item)
         root = self._tag_root_for_item(item, create=False)
@@ -1034,6 +1074,16 @@ class MainWindow(QMainWindow):
         self.current_size_filter = None
         self._size_filter_pending = False
         self.status_bar.showMessage(f"Image size filter failed: {message}")
+
+    def _tag_csv_export_finished(self, output_path: str, row_count: int, skipped_count: int) -> None:
+        self.current_tag_export = None
+        skipped_suffix = f" ({skipped_count} skipped)" if skipped_count else ""
+        self.status_bar.showMessage(f"Exported {row_count} material set(s) to {output_path}{skipped_suffix}")
+
+    def _tag_csv_export_failed(self, message: str) -> None:
+        self.current_tag_export = None
+        QMessageBox.warning(self, "CSV Export Error", message)
+        self.status_bar.showMessage("Tag CSV export failed")
 
     def apply_filter(self, text: str) -> None:
         if self._using_favorites_search():

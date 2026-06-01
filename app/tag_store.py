@@ -130,6 +130,23 @@ class TagStore:
             ).fetchall()
         return {str(row[0]) for row in rows}
 
+    def tagged_entries(self, tag_name: str) -> list[tuple[str, str, str]]:
+        tag_name = normalize_tag_name(tag_name)
+        if not tag_name:
+            return []
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                select tagged_files.relative_path, tagged_files.scope, tagged_files.set_key
+                from tagged_files
+                join tags on tags.id = tagged_files.tag_id
+                where lower(tags.name) = lower(?)
+                order by tagged_files.relative_path
+                """,
+                (tag_name,),
+            ).fetchall()
+        return [(str(row[0]), str(row[1]), str(row[2])) for row in rows]
+
     def relative_path_for_item(self, item: MediaItem) -> str | None:
         try:
             return str(item.preview_path.resolve().relative_to(self.root)).replace("\\", "/")
