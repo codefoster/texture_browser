@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QSplashScreen,
     QSplitter,
+    QSizePolicy,
     QStatusBar,
     QToolBar,
     QVBoxLayout,
@@ -313,6 +314,8 @@ class MainWindow(QMainWindow):
 
         self.search_box = QLineEdit()
         self.search_box.setPlaceholderText("Search files. Use commas for alternatives, or paste a folder/file path and press Enter...")
+        self.search_box.setMinimumWidth(0)
+        self.search_box.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.search_box.textChanged.connect(self.apply_filter)
         self.search_box.returnPressed.connect(self.browse_to_search_path)
         self.favorites_search_checkbox = QCheckBox("Favorites")
@@ -349,9 +352,17 @@ class MainWindow(QMainWindow):
         self.thumbnails_label = self._section_label("Thumbnails")
         size_bar.addWidget(self.thumbnails_label)
         self.size_buttons = {}
+        size_button_labels = {
+            ThumbnailSize.TINY: "T",
+            ThumbnailSize.SMALL: "S",
+            ThumbnailSize.MEDIUM: "M",
+            ThumbnailSize.LARGE: "L",
+        }
         for size in ThumbnailSize:
-            button = QPushButton(size.value)
+            button = QPushButton(size_button_labels[size])
             button.setCheckable(True)
+            button.setToolTip(size.value)
+            button.setFixedWidth(scale_px(28, self))
             button.clicked.connect(lambda checked=False, chosen=size: self.set_thumbnail_size(chosen))
             self.size_buttons[size] = button
             size_bar.addWidget(button)
@@ -365,6 +376,7 @@ class MainWindow(QMainWindow):
         size_bar.addWidget(self.extension_filter_box)
         self.image_size_filter_box = QComboBox()
         self.image_size_filter_box.setMinimumWidth(scale_px(132, self))
+        self.image_size_filter_box.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         for label, value in IMAGE_SIZE_FILTERS:
             self.image_size_filter_box.addItem(label, value)
         self.image_size_filter_box.currentIndexChanged.connect(self._image_size_filter_changed)
@@ -374,18 +386,17 @@ class MainWindow(QMainWindow):
         size_bar.addWidget(self.image_size_filter_box)
         self.tag_filter_box = QComboBox()
         self.tag_filter_box.setMinimumWidth(scale_px(132, self))
+        self.tag_filter_box.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         self.tag_filter_box.currentIndexChanged.connect(lambda _index: self._tag_filter_changed())
         size_bar.addSpacing(18)
         self.tag_manager_button = self._section_button("Tag")
         self.tag_manager_button.clicked.connect(self.open_tag_manager)
         size_bar.addWidget(self.tag_manager_button)
         size_bar.addWidget(self.tag_filter_box)
-        self.export_tag_csv_button = QPushButton("Export CSV")
-        self.export_tag_csv_button.clicked.connect(self.export_tag_csv)
-        size_bar.addWidget(self.export_tag_csv_button)
         self.naming_convention_box = QLineEdit()
         self.naming_convention_box.setPlaceholderText("metallic, albedo, roughness, normal")
-        self.naming_convention_box.setMinimumWidth(scale_px(280, self))
+        self.naming_convention_box.setMinimumWidth(0)
+        self.naming_convention_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.naming_convention_box.textChanged.connect(self.save_naming_convention)
         self.naming_convention_box.textChanged.connect(self._workflow_text_changed)
         size_bar.addSpacing(18)
@@ -409,7 +420,7 @@ class MainWindow(QMainWindow):
         )
 
         right_panel = QWidget()
-        right_panel.setMinimumWidth(0)
+        right_panel.setMinimumWidth(scale_px(100, self))
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
         search_row = QHBoxLayout()
@@ -427,10 +438,10 @@ class MainWindow(QMainWindow):
         splitter = QSplitter()
         splitter.addWidget(self.folder_browser)
         splitter.addWidget(right_panel)
-        splitter.setChildrenCollapsible(True)
+        splitter.setChildrenCollapsible(False)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([scale_px(340, self), scale_px(1100, self)])
-        self.folder_browser.setMinimumWidth(0)
+        self.folder_browser.setMinimumWidth(scale_px(100, self))
 
         container = QWidget()
         layout = QVBoxLayout(container)
@@ -448,9 +459,12 @@ class MainWindow(QMainWindow):
         cancel_button.clicked.connect(self.cancel_scan_from_ui)
         cache_here_button = QPushButton("Cache Here")
         cache_here_button.clicked.connect(self.cache_current_root)
+        self.export_tag_csv_button = QPushButton("Export CSV")
+        self.export_tag_csv_button.clicked.connect(self.export_tag_csv)
         toolbar.addWidget(choose_root)
         toolbar.addWidget(cancel_button)
         toolbar.addWidget(cache_here_button)
+        toolbar.addWidget(self.export_tag_csv_button)
 
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
@@ -1337,7 +1351,7 @@ class MainWindow(QMainWindow):
 
         def predicate(media_item) -> bool:
             if media_item.is_video or media_item.is_model:
-                return False
+                return True
             dimensions = self._cached_image_dimensions_for_item(media_item)
             if dimensions is None:
                 return self._size_filter_pending and media_item.metadata.get("dimensions_error") != "1"

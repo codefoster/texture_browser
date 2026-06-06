@@ -2,20 +2,77 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QDir, QModelIndex, Qt, Signal
+from PySide6.QtCore import QDir, QModelIndex, QPoint, QSize, Qt, Signal
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
+    QApplication,
+    QFileIconProvider,
     QFileSystemModel,
     QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QMenu,
     QSplitter,
+    QStyle,
     QTreeView,
     QVBoxLayout,
     QWidget,
 )
 from app.utils import scale_px
+
+
+class StableFolderIconProvider(QFileIconProvider):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        try:
+            self.setOption(QFileIconProvider.DontUseCustomDirectoryIcons)
+        except AttributeError:
+            pass
+
+    def icon(self, info_or_type):  # type: ignore[override]
+        if hasattr(info_or_type, "isDir") and info_or_type.isDir():
+            return _folder_icon_for_path(Path(info_or_type.absoluteFilePath()))
+        icon = super().icon(info_or_type)
+        if not icon.isNull():
+            return icon
+        style = QApplication.style()
+        if style is None:
+            return icon
+        return style.standardIcon(QStyle.SP_FileIcon)
+
+
+def _folder_icon_for_path(path: Path):
+    style = QApplication.style()
+    if style is None:
+        return None
+    if path.drive and path.parent == path:
+        return style.standardIcon(QStyle.SP_DriveHDIcon)
+    return style.standardIcon(QStyle.SP_DirIcon)
+
+
+class FolderFileSystemModel(QFileSystemModel):
+    def data(self, index: QModelIndex, role: int = Qt.DisplayRole):
+        value = super().data(index, role)
+        if role == Qt.DecorationRole and index.column() == 0:
+            info = self.fileInfo(index)
+            if info.isDir():
+                icon = _folder_icon_for_path(Path(info.absoluteFilePath()))
+                if icon is not None:
+                    return icon
+                return value
+            try:
+                if value is not None and not value.isNull():
+                    return value
+            except AttributeError:
+                if value is not None:
+                    return value
+            style = QApplication.style()
+            if style is None:
+                return value
+            return style.standardIcon(QStyle.SP_FileIcon)
+        return value
 
 
 class FolderBrowser(QWidget):
@@ -44,7 +101,8 @@ class FolderBrowser(QWidget):
         favorites_header.addWidget(self.add_favorite_button)
         favorites_header.addWidget(self.remove_favorite_button)
 
-        self.model = QFileSystemModel(self)
+        self.model = FolderFileSystemModel(self)
+        self.model.setIconProvider(StableFolderIconProvider(self.model))
         self.model.setRootPath(QDir.rootPath())
         self.model.setFilter(QDir.AllDirs | QDir.NoDotAndDotDot | QDir.Drives)
 
@@ -53,13 +111,16 @@ class FolderBrowser(QWidget):
         self.tree.setHeaderHidden(True)
         self.tree.setAnimated(True)
         self.tree.setIndentation(scale_px(16, self))
+        self.tree.setIconSize(QSize(scale_px(18, self), scale_px(18, self)))
         self.tree.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
         self.tree.setHorizontalScrollMode(QTreeView.ScrollPerPixel)
         self.tree.setMinimumWidth(0)
+        self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
         for column in range(1, 4):
             self.tree.hideColumn(column)
         self.tree.selectionModel().currentChanged.connect(self._on_current_changed)
         self.tree.doubleClicked.connect(self._on_tree_double_clicked)
+        self.tree.customContextMenuRequested.connect(self._show_tree_context_menu)
 
         favorites_panel = QWidget()
         favorites_layout = QVBoxLayout(favorites_panel)
@@ -100,6 +161,9 @@ class FolderBrowser(QWidget):
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             checked = True if enabled_favorites is None else path in enabled_favorites
             item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
+            icon = _folder_icon_for_path(path)
+            if icon is not None:
+                item.setIcon(icon)
             self.favorites_list.addItem(item)
         self.favorites_list.blockSignals(False)
 
@@ -113,6 +177,19 @@ class FolderBrowser(QWidget):
         if path.exists():
             self._current_folder = path
             self.folderSelected.emit(path)
+
+    def _show_tree_context_menu(self, position: QPoint) -> None:
+        index = self.tree.indexAt(position)
+        if not index.isValid():
+            return
+        path = Path(self.model.filePath(index))
+        if not path.exists():
+            return
+        menu = QMenu(self)
+        show_folder_action = QAction("Show Folder", self)
+        show_folder_action.triggered.connect(lambda checked=False, folder=path: self.folderOpenRequested.emit(folder))
+        menu.addAction(show_folder_action)
+        menu.exec(self.tree.viewport().mapToGlobal(position))
 
     def _on_favorite_activated(self, item: QListWidgetItem) -> None:
         path = item.data(Qt.UserRole)
