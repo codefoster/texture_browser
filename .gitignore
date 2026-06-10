@@ -15,3 +15,6 @@ dist/
 .ruff_cache/
 
 *.log
+
+godot_material_renderer/temp_material/
+preview_renderer/**/*.png
