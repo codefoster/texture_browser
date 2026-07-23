@@ -87,6 +87,7 @@ var preset_name_edit: LineEdit
 var preview_preset_option: OptionButton
 var lighting_preset_option: OptionButton
 var import_drop_targets: Array = []
+var material_set_drop_button: Button
 var hovered_import_drop_button: Button
 var checkbox_checked_icon: Texture2D
 var checkbox_unchecked_icon: Texture2D
@@ -649,6 +650,17 @@ func _create_controls() -> void:
 	_add_import_button(import_row_three, "Disp", "height")
 	_add_import_button(import_row_three, "Alpha", "opacity")
 
+	material_set_drop_button = Button.new()
+	material_set_drop_button.text = "Drop material set here"
+	material_set_drop_button.tooltip_text = "Drop multiple textures to automatically fill matching map slots"
+	material_set_drop_button.custom_minimum_size.y = 34.0
+	material_set_drop_button.pressed.connect(_on_material_set_drop_button_pressed)
+	material_set_drop_button.mouse_entered.connect(_on_import_drop_target_hovered.bind(material_set_drop_button, true))
+	material_set_drop_button.mouse_exited.connect(_on_import_drop_target_hovered.bind(material_set_drop_button, false))
+	_apply_import_button_style(material_set_drop_button, false)
+	stack.add_child(material_set_drop_button)
+	import_drop_targets.append({"button": material_set_drop_button, "channel": "material_set"})
+
 	var import_row_four := HBoxContainer.new()
 	import_row_four.add_theme_constant_override("separation", 6)
 	stack.add_child(import_row_four)
@@ -869,18 +881,150 @@ func _on_window_files_dropped(files: PackedStringArray) -> void:
 	var target := _drop_target_at_mouse_position()
 	var channel := str(target.get("channel", ""))
 	if channel == "":
-		_set_status("Drop textures directly on an Import maps button")
+		_set_status("Drop textures on a map button or the material-set drop zone")
 		return
 
-	var path := _first_supported_dropped_texture(files)
-	if path == "":
-		_set_status("Drop failed: no supported texture file")
-		return
-
-	_import_texture_map(channel, path)
 	var button := target.get("button") as Button
+	if channel == "material_set":
+		_import_dropped_material_set(files)
+	else:
+		var path := _first_supported_dropped_texture(files)
+		if path == "":
+			_set_status("Drop failed: no supported texture file")
+			return
+		_import_texture_map(channel, path)
 	if button != null:
 		_flash_import_drop_button(button)
+
+
+func _on_material_set_drop_button_pressed() -> void:
+	_set_status("Drop multiple texture files here to auto-fill the material maps")
+
+
+func _import_dropped_material_set(files: PackedStringArray) -> void:
+	var selected: Dictionary = {}
+	var supported_count := 0
+	var unknown_count := 0
+	for path in files:
+		if not _is_supported_texture_path(path) or not FileAccess.file_exists(path):
+			continue
+		supported_count += 1
+		var candidate := _texture_role_candidate(path)
+		var channel := str(candidate.get("channel", ""))
+		if channel == "":
+			unknown_count += 1
+			continue
+		var existing: Dictionary = selected.get(channel, {})
+		if existing.is_empty() or int(candidate.get("score", 0)) > int(existing.get("score", 0)):
+			selected[channel] = candidate
+
+	if selected.is_empty():
+		_set_status("No recognizable material maps found in %d texture(s)" % supported_count)
+		return
+
+	var import_order := ["albedo", "normal", "roughness", "metallic", "ao", "height", "opacity", "packed"]
+	var imported_names: Array[String] = []
+	for channel in import_order:
+		if not selected.has(channel):
+			continue
+		var candidate: Dictionary = selected[channel]
+		_import_texture_map(channel, str(candidate.get("path", "")))
+		imported_names.append(_material_channel_display_name(channel))
+		if channel == "roughness":
+			var detected_mode := str(candidate.get("roughness_mode", ""))
+			if detected_mode != "":
+				_set_roughness_mode(detected_mode)
+		if channel == "packed":
+			_apply_detected_packed_layout(str(candidate.get("packed_layout", "")))
+
+	var ignored_count: int = maxi(0, supported_count - selected.size())
+	var status := "Material set: %s" % ", ".join(imported_names)
+	if ignored_count > 0 or unknown_count > 0:
+		status += " (%d extra/unrecognized ignored)" % maxi(ignored_count, unknown_count)
+	_set_status(status)
+	_update_health_check()
+
+
+func _texture_role_candidate(path: String) -> Dictionary:
+	var stem := path.get_file().get_basename().to_lower()
+	var normalized := stem.replace("-", "_").replace(".", "_").replace(" ", "_")
+	while normalized.contains("__"):
+		normalized = normalized.replace("__", "_")
+	var padded := "_%s_" % normalized
+
+	var packed_layout := _detect_packed_layout(padded)
+	if packed_layout != "":
+		return {"channel": "packed", "path": path, "score": 120, "packed_layout": packed_layout}
+	if normalized.contains("ambientocclusion") or _has_texture_token(padded, ["ao", "occlusion"]):
+		return {"channel": "ao", "path": path, "score": 100}
+	if normalized.contains("basecolor") or normalized.contains("base_colour") or _has_texture_token(padded, ["albedo", "diffuse", "diff", "color", "colour"]):
+		return {"channel": "albedo", "path": path, "score": 100}
+	if _has_texture_token(padded, ["normal", "norm", "nrm", "nor"]):
+		return {"channel": "normal", "path": path, "score": 100}
+	if _has_texture_token(padded, ["roughness", "rough", "rgh"]):
+		return {"channel": "roughness", "path": path, "score": 100, "roughness_mode": "grayscale"}
+	if _has_texture_token(padded, ["glossiness", "gloss", "glossy"]):
+		return {"channel": "roughness", "path": path, "score": 95, "roughness_mode": "invert_grayscale"}
+	if _has_texture_token(padded, ["metallic", "metalness", "metal"]):
+		return {"channel": "metallic", "path": path, "score": 100}
+	if _has_texture_token(padded, ["displacement", "displace", "disp", "height", "bump"]):
+		return {"channel": "height", "path": path, "score": 100}
+	if _has_texture_token(padded, ["opacity", "alpha", "transparency", "transparent", "mask"]):
+		return {"channel": "opacity", "path": path, "score": 100}
+	return {}
+
+
+func _has_texture_token(padded_name: String, tokens: Array) -> bool:
+	for token in tokens:
+		if padded_name.contains("_%s_" % str(token)):
+			return true
+	return false
+
+
+func _detect_packed_layout(padded_name: String) -> String:
+	if _has_texture_token(padded_name, ["orm", "occlusionroughnessmetallic"]):
+		return "orm"
+	if _has_texture_token(padded_name, ["mro", "metalroughnessocclusion"]):
+		return "mro"
+	if _has_texture_token(padded_name, ["rma", "roughnessmetallicao"]):
+		return "rma"
+	return ""
+
+
+func _apply_detected_packed_layout(layout: String) -> void:
+	if layout == "":
+		return
+	packed_maps_enabled = true
+	if packed_maps_check != null:
+		packed_maps_check.button_pressed = true
+	match layout:
+		"orm":
+			workflow_preset = "orm"
+			_set_packed_channels("r", "g", "b")
+		"mro":
+			workflow_preset = "mro"
+			_set_packed_channels("b", "g", "r")
+		"rma":
+			workflow_preset = "rma"
+			_set_packed_channels("b", "r", "g")
+	if workflow_option != null:
+		workflow_option.select(_workflow_preset_index(workflow_preset))
+	_update_packed_channel_controls()
+	_apply_material_channel_sources()
+
+
+func _material_channel_display_name(channel: String) -> String:
+	match channel:
+		"roughness":
+			return "Rough"
+		"metallic":
+			return "Metal"
+		"opacity":
+			return "Alpha"
+		"packed":
+			return "Packed"
+		_:
+			return channel.capitalize()
 
 
 func _drop_channel_at_mouse_position() -> String:
