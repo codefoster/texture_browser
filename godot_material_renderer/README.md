@@ -1,56 +1,42 @@
 # Texture Browser Material Renderer
 
-Small Godot project for rendering a material preview sphere from texture paths.
-The renderer is separate from the main Texture Browser UI while it is being
-stabilized, but it is designed to become the GPU-backed material thumbnail
-generator.
+Godot 4 PBR material previewer used by Texture Browser. Right-click an image in
+Texture Browser and choose Open material renderer; the browser detects its
+material set and supplies the recognized maps.
 
-## Current features
+## Current Features
 
-- PBR sphere preview with albedo, normal, roughness, metallic, AO, packed map,
-  and height/parallax inputs.
-- Workflow presets for metal/rough, spec/gloss, ORM, MRO, RMA, and
-  diffuse/normal.
-- Packed map channel selectors with an explicit `Use packed channels` checkbox
-  so combined maps can be ignored until needed.
-- Roughness modes for original red, grayscale, inverted red, and inverted
-  grayscale.
-- Height/parallax preview with enable, invert, and strength controls.
-- DirectX normal support through the `Flip normal green` toggle.
-- HDRI lighting with internal Ice Lake HDRI assets, HDRI rotation, and HDRI
-  brightness up to 12.
-- Draggable key light that can light from above, below, or either side.
-- AO strength, UV scale, sphere scale, background swatches, albedo-only
-  diagnostic mode, export folder browsing, and image export.
+- Albedo, normal, roughness/gloss, metallic, AO, height, opacity, and packed
+  ORM/MRO/RMA inputs.
+- Multi-file drag and drop with automatic map-role detection.
+- Metal/rough, spec/gloss, ORM, MRO, RMA, and diffuse/normal workflows.
+- Solo-map inspection, map replacement, material health checks, and presets.
+- HDRI and movable key/fill lighting, lighting presets, and background swatches.
+- Parallax height plus optional real geometry displacement for dense planes and
+  spheres.
+- UV tiling shared by shading and displacement, normal green-channel flipping,
+  opacity, custom objects, and PNG export.
+- Debounced settings and displacement updates for lower CPU and disk usage.
+- EXR fallback conversion through oiiotool when Godot cannot decode a file.
 
-## Notes
+## Development Run
 
-- Godot's height map support here is parallax height mapping, not true geometry
-  displacement. It is intended for fast material thumbnail previews.
-- Set the roughness slider to `1.0` to read roughness maps as authored. Lower
-  values are artistic overrides and will make materials glossier.
-- Keep generated render tests and runtime HDRI files under `temp_material/`;
-  that folder is intentionally ignored by git.
+~~~powershell
+godot --path godot_material_renderer -- --basecolor "D:\materials\stone_albedo.png" --normal "D:\materials\stone_normal.png" --roughness "D:\materials\stone_roughness.png"
+~~~
 
-Run it visibly from the repo root:
+## Windows Export
 
-```powershell
-godot --path godot_material_renderer -- `
-  --basecolor "D:\3D_Library\Materials\MegaScans\soil_sandy_ve0hedi\ve0hedi_8K_Albedo.jpg" `
-  --normal "D:\3D_Library\Materials\MegaScans\soil_sandy_ve0hedi\ve0hedi_8K_Normal.jpg" `
-  --roughness "D:\3D_Library\Materials\MegaScans\soil_sandy_ve0hedi\ve0hedi_8K_Roughness.jpg" `
-  --ao "D:\3D_Library\Materials\MegaScans\soil_sandy_ve0hedi\ve0hedi_8K_AO.jpg"
-```
+Install the matching Godot export templates, then run:
 
-Render to a PNG:
+~~~powershell
+godot --headless --path godot_material_renderer --export-release "Windows Desktop" "build\TextureBrowserMaterialRenderer.exe"
+~~~
 
-```powershell
-godot --path godot_material_renderer -- `
-  --basecolor "D:\3D_Library\Materials\MegaScans\soil_sandy_ve0hedi\ve0hedi_8K_Albedo.jpg" `
-  --normal "D:\3D_Library\Materials\MegaScans\soil_sandy_ve0hedi\ve0hedi_8K_Normal.jpg" `
-  --roughness "D:\3D_Library\Materials\MegaScans\soil_sandy_ve0hedi\ve0hedi_8K_Roughness.jpg" `
-  --ao "D:\3D_Library\Materials\MegaScans\soil_sandy_ve0hedi\ve0hedi_8K_AO.jpg" `
-  --output "C:\tmp\soil_sandy_godot_preview.png"
-```
+The export preset embeds the PCK. When the exported executable is present,
+TextureBrowser.spec includes it in the packaged browser. Without an export, the
+source build falls back to GODOT_PATH, a Godot executable on PATH, or a Godot
+installation managed by WinGet.
 
-This project is intentionally separate from Texture Browser until the renderer is stable.
+temp_material/ contains runtime and render-test output and is excluded from the
+exported project.

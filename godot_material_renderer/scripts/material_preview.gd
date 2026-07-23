@@ -21,6 +21,7 @@ var hdri_sky_material: PanoramaSkyMaterial
 var hdri_texture: ImageTexture
 var hdri_rotation_timer: Timer
 var displacement_uv_rebuild_timer: Timer
+var settings_save_timer: Timer
 var hdri_last_offset := -1
 var preview_material: StandardMaterial3D
 var albedo_source_image: Image
@@ -189,6 +190,10 @@ func _ready() -> void:
 		_connect_file_drop_signal()
 
 
+func _exit_tree() -> void:
+	_flush_viewer_settings()
+
+
 func _process(_delta: float) -> void:
 	if not capture_requested:
 		_update_import_drop_hover_highlight()
@@ -330,7 +335,7 @@ func _apply_hdri(args: Dictionary) -> void:
 	_apply_hdri_brightness()
 
 	var sky := Sky.new()
-	sky.process_mode = Sky.PROCESS_MODE_REALTIME
+	sky.process_mode = Sky.PROCESS_MODE_QUALITY
 	sky.radiance_size = Sky.RADIANCE_SIZE_256
 	sky.sky_material = hdri_sky_material
 
@@ -1624,7 +1629,7 @@ func _on_uv_scale_changed(value: float) -> void:
 	uv_scale = value
 	_apply_shared_uv_scale()
 	if displacement_enabled:
-		_schedule_displacement_uv_rebuild()
+		_schedule_displacement_rebuild("UV scale changed; displacement rebuild queued")
 	_update_control_labels()
 	_save_viewer_settings()
 
@@ -1637,18 +1642,18 @@ func _apply_shared_uv_scale() -> void:
 	preview_material.ao_on_uv2 = false
 
 
-func _schedule_displacement_uv_rebuild() -> void:
+func _schedule_displacement_rebuild(message: String = "Displacement rebuild queued") -> void:
 	if displacement_uv_rebuild_timer == null:
 		displacement_uv_rebuild_timer = Timer.new()
 		displacement_uv_rebuild_timer.one_shot = true
-		displacement_uv_rebuild_timer.wait_time = 0.45
-		displacement_uv_rebuild_timer.timeout.connect(_on_displacement_uv_rebuild_timeout)
+		displacement_uv_rebuild_timer.wait_time = 0.35
+		displacement_uv_rebuild_timer.timeout.connect(_on_displacement_rebuild_timeout)
 		add_child(displacement_uv_rebuild_timer)
 	displacement_uv_rebuild_timer.start()
-	_set_status("UV scale changed; displacement rebuild queued")
+	_set_status(message)
 
 
-func _on_displacement_uv_rebuild_timeout() -> void:
+func _on_displacement_rebuild_timeout() -> void:
 	if displacement_enabled and height_source_image != null:
 		_rebuild_displacement_mesh()
 
@@ -1718,7 +1723,7 @@ func _on_displacement_quality_selected(index: int) -> void:
 func _on_displacement_strength_changed(value: float) -> void:
 	displacement_strength = value
 	if displacement_enabled:
-		_rebuild_displacement_mesh()
+		_schedule_displacement_rebuild()
 	_update_control_labels()
 	_save_viewer_settings()
 
@@ -1726,7 +1731,7 @@ func _on_displacement_strength_changed(value: float) -> void:
 func _on_displacement_midlevel_changed(value: float) -> void:
 	displacement_midlevel = value
 	if displacement_enabled:
-		_rebuild_displacement_mesh()
+		_schedule_displacement_rebuild()
 	_update_control_labels()
 	_save_viewer_settings()
 
@@ -2657,6 +2662,7 @@ func _build_displaced_plane() -> ArrayMesh:
 			_add_displaced_plane_vertex(surface, u0, v0)
 			_add_displaced_plane_vertex(surface, u0, v1)
 			_add_displaced_plane_vertex(surface, u1, v1)
+	surface.index()
 	surface.generate_normals()
 	return surface.commit()
 
@@ -2678,6 +2684,7 @@ func _build_displaced_sphere() -> ArrayMesh:
 			_add_displaced_sphere_vertex(surface, u0, v0)
 			_add_displaced_sphere_vertex(surface, u0, v1)
 			_add_displaced_sphere_vertex(surface, u1, v1)
+	surface.index()
 	surface.generate_normals()
 	return surface.commit()
 
@@ -2812,6 +2819,18 @@ func _load_viewer_settings() -> void:
 
 
 func _save_viewer_settings() -> void:
+	if capture_requested:
+		return
+	if settings_save_timer == null:
+		settings_save_timer = Timer.new()
+		settings_save_timer.one_shot = true
+		settings_save_timer.wait_time = 0.75
+		settings_save_timer.timeout.connect(_flush_viewer_settings)
+		add_child(settings_save_timer)
+	settings_save_timer.start()
+
+
+func _flush_viewer_settings() -> void:
 	if capture_requested:
 		return
 	var config := ConfigFile.new()
@@ -3117,7 +3136,12 @@ func _convert_exr_to_cached_png(path: String) -> String:
 		push_warning("Could not create EXR cache directory: %s" % cache_dir)
 		return ""
 
-	var cache_name := "%s_%s.png" % [path.get_file().get_basename(), path.sha256_text().substr(0, 16)]
+	var source_size := 0
+	var source_file := FileAccess.open(path, FileAccess.READ)
+	if source_file != null:
+		source_size = source_file.get_length()
+	var source_signature := "%s|%d|%d" % [path, FileAccess.get_modified_time(path), source_size]
+	var cache_name := "%s_%s.png" % [path.get_file().get_basename(), source_signature.sha256_text().substr(0, 16)]
 	var cached_path := cache_dir.path_join(cache_name)
 	if FileAccess.file_exists(cached_path):
 		return cached_path

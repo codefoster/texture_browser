@@ -46,12 +46,13 @@ except ImportError:  # pragma: no cover
 _manifest_cache: dict[Path, dict] = {}
 _manifest_cache_lock = threading.RLock()
 _memory_cache_lock = threading.RLock()
-_memory_pixmap_cache: OrderedDict[tuple[str, int, int, int], QPixmap] = OrderedDict()
-_memory_cache_limit = 384
+_memory_image_cache: OrderedDict[tuple[str, int, int, int], QImage] = OrderedDict()
+_memory_cache_bytes = 0
+_memory_cache_byte_limit = 96 * 1024 * 1024
 
 
 class ThumbnailWorkerSignals(QObject):
-    ready = Signal(int, str, int, QPixmap)
+    ready = Signal(int, str, int, QImage)
     status = Signal(str)
 
 
@@ -64,19 +65,19 @@ class ThumbnailWorker(QRunnable):
         self.signals = ThumbnailWorkerSignals()
 
     def run(self) -> None:
-        pixmap = load_or_create_thumbnail(self.item, self.size, self.signals.status.emit)
-        self.signals.ready.emit(self.generation, str(self.item.preview_path), self.size, pixmap)
+        image = load_or_create_thumbnail(self.item, self.size, self.signals.status.emit)
+        self.signals.ready.emit(self.generation, str(self.item.preview_path), self.size, image)
 
 
-def load_or_create_thumbnail(item: MediaItem, size: int, status_callback=None) -> QPixmap:
+def load_or_create_thumbnail(item: MediaItem, size: int, status_callback=None) -> QImage:
     source_path = item.preview_path
     cache_path = None
     memory_key = _memory_cache_key(source_path, size)
 
     if memory_key is not None:
-        pixmap = _memory_cache_lookup(memory_key)
-        if pixmap is not None:
-            return pixmap
+        image = _memory_cache_lookup(memory_key)
+        if image is not None:
+            return image
 
     try:
         manifest_candidate = _manifest_cache_path(source_path, size)
@@ -88,24 +89,23 @@ def load_or_create_thumbnail(item: MediaItem, size: int, status_callback=None) -
                 candidate_paths.append(candidate)
         for candidate in candidate_paths:
             if candidate.exists():
-                pixmap = QPixmap(str(candidate))
-                if not pixmap.isNull():
+                image = QImage(str(candidate))
+                if not image.isNull():
                     if memory_key is not None:
-                        _remember_pixmap(memory_key, pixmap)
-                    return pixmap
+                        _remember_image(memory_key, image)
+                    return image
         cache_path = _preferred_cache_path(source_path, size)
     except OSError:
         cache_path = None
 
-    pixmap = _generate_thumbnail(item, size)
-    if cache_path is not None and not pixmap.isNull():
-        pixmap.save(str(cache_path), "PNG")
-        _update_manifest_entry(source_path, size, cache_path)
-    if memory_key is not None and not pixmap.isNull():
-        _remember_pixmap(memory_key, pixmap)
+    image = _generate_thumbnail(item, size)
+    if cache_path is not None and not image.isNull():
+        image.save(str(cache_path), "PNG")
+    if memory_key is not None and not image.isNull():
+        _remember_image(memory_key, image)
     if status_callback:
         status_callback(f"Generating thumbnails... {item.display_name}")
-    return pixmap
+    return image
 
 
 def preferred_cache_path_for(source_path: Path, size: int) -> Path:
@@ -179,13 +179,13 @@ def _preferred_cache_path(source_path: Path, size: int) -> Path:
     return cache_dir() / f"{global_key}_{size}.png"
 
 
-def _generate_thumbnail(item: MediaItem, size: int) -> QPixmap:
+def _generate_thumbnail(item: MediaItem, size: int) -> QImage:
     image = load_media_qimage(item, size)
     if image is None or image.isNull():
-        return build_placeholder(item.extension or "file", size, item.is_video)
+        return build_placeholder_image(item.extension or "file", size, item.is_video)
 
     scaled = image.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-    canvas = QPixmap(size, size)
+    canvas = QImage(size, size, QImage.Format_ARGB32_Premultiplied)
     canvas.fill(QColor("#1e1f22"))
 
     painter = QPainter(canvas)
@@ -299,10 +299,10 @@ def _load_with_qimage_reader(path: Path, target_size: int | None) -> QImage | No
     return image if not image.isNull() else None
 
 
-def build_placeholder(label: str, size: int, video: bool = False) -> QPixmap:
-    pixmap = QPixmap(size, size)
-    pixmap.fill(QColor("#23262b"))
-    painter = QPainter(pixmap)
+def build_placeholder_image(label: str, size: int, video: bool = False) -> QImage:
+    image = QImage(size, size, QImage.Format_ARGB32_Premultiplied)
+    image.fill(QColor("#23262b"))
+    painter = QPainter(image)
     painter.setRenderHint(QPainter.Antialiasing)
     painter.setPen(QPen(QColor("#4f5b66"), 1))
     painter.drawRoundedRect(4, 4, size - 8, size - 8, 8, 8)
@@ -310,11 +310,15 @@ def build_placeholder(label: str, size: int, video: bool = False) -> QPixmap:
     font = QFont("Segoe UI", max(9, size // 8))
     font.setBold(True)
     painter.setFont(font)
-    painter.drawText(pixmap.rect(), Qt.AlignCenter, label.replace(".", "").upper())
+    painter.drawText(image.rect(), Qt.AlignCenter, label.replace(".", "").upper())
     if video:
         _draw_video_badge(painter, size)
     painter.end()
-    return pixmap
+    return image
+
+
+def build_placeholder(label: str, size: int, video: bool = False) -> QPixmap:
+    return QPixmap.fromImage(build_placeholder_image(label, size, video))
 
 
 def _draw_video_badge(painter: QPainter, size: int) -> None:
@@ -339,21 +343,27 @@ def _memory_cache_key(source_path: Path, size: int) -> tuple[str, int, int, int]
         return None
 
 
-def _memory_cache_lookup(key: tuple[str, int, int, int]) -> QPixmap | None:
+def _memory_cache_lookup(key: tuple[str, int, int, int]) -> QImage | None:
     with _memory_cache_lock:
-        pixmap = _memory_pixmap_cache.get(key)
-        if pixmap is None:
+        image = _memory_image_cache.get(key)
+        if image is None:
             return None
-        _memory_pixmap_cache.move_to_end(key)
-        return QPixmap(pixmap)
+        _memory_image_cache.move_to_end(key)
+        return image.copy()
 
 
-def _remember_pixmap(key: tuple[str, int, int, int], pixmap: QPixmap) -> None:
+def _remember_image(key: tuple[str, int, int, int], image: QImage) -> None:
+    global _memory_cache_bytes
     with _memory_cache_lock:
-        _memory_pixmap_cache[key] = QPixmap(pixmap)
-        _memory_pixmap_cache.move_to_end(key)
-        while len(_memory_pixmap_cache) > _memory_cache_limit:
-            _memory_pixmap_cache.popitem(last=False)
+        previous = _memory_image_cache.pop(key, None)
+        if previous is not None:
+            _memory_cache_bytes -= previous.sizeInBytes()
+        stored = image.copy()
+        _memory_image_cache[key] = stored
+        _memory_cache_bytes += stored.sizeInBytes()
+        while _memory_image_cache and _memory_cache_bytes > _memory_cache_byte_limit:
+            _, removed = _memory_image_cache.popitem(last=False)
+            _memory_cache_bytes -= removed.sizeInBytes()
 
 
 def _manifest_cache_path(source_path: Path, size: int) -> Path | None:
@@ -381,30 +391,6 @@ def _manifest_cache_path(source_path: Path, size: int) -> Path | None:
         return None
     candidate = library_root / relative_thumb
     return candidate
-
-
-def _update_manifest_entry(source_path: Path, size: int, cache_path: Path) -> None:
-    library_root = find_library_cache_root(source_path)
-    if library_root is None:
-        return
-    try:
-        relative_path = str(source_path.resolve().relative_to(library_root.resolve())).replace("\\", "/")
-        relative_thumb = str(cache_path.resolve().relative_to(library_root.resolve())).replace("\\", "/")
-        stat = source_path.stat()
-    except (OSError, ValueError):
-        return
-
-    manifest = _load_manifest(library_root)
-    entries = manifest.setdefault("entries", {})
-    entry = entries.setdefault(relative_path, {})
-    entry["mtime_ns"] = stat.st_mtime_ns
-    entry["size"] = stat.st_size
-    thumbs = entry.setdefault("thumbs", {})
-    if not isinstance(thumbs, dict):
-        thumbs = {}
-        entry["thumbs"] = thumbs
-    thumbs[str(size)] = relative_thumb
-    _store_manifest(library_root, manifest)
 
 
 def _load_manifest(root: Path) -> dict:

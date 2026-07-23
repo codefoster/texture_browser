@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 from datetime import datetime
 import ctypes
 import os
 import re
 import shutil
 import sys
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QThreadPool, Qt, QTimer
@@ -40,6 +42,7 @@ from app.channel_inspector import ChannelInspectorDialog
 from app.favorites import FavoritesStore
 from app.favorites_index import FavoritesIndexStore, FavoritesIndexWorker
 from app.folder_tree import FolderBrowser
+from app.godot_renderer import launch_material_renderer
 from app.media_dimensions import media_dimensions
 from app.models import THUMBNAIL_DIMENSIONS, ThumbnailSize
 from app.naming_presets import NamingPresetDialog
@@ -66,6 +69,9 @@ from app.workflow_filter import workflow_filter_predicate
 
 APP_USER_MODEL_ID = "TextureBrowser.TextureBrowser"
 ANY_TAG_LABEL = "Any tag"
+FOLDER_SCAN_CACHE_MAX_FOLDERS = 8
+FOLDER_SCAN_CACHE_MAX_ITEMS = 100_000
+FOLDER_SCAN_CACHE_TTL_SECONDS = 600.0
 TEXTURE_ROLE_TERMS = {
     "albedo",
     "alpha",
@@ -209,6 +215,13 @@ def resource_path(relative_path: str) -> Path:
     return base_path / relative_path
 
 
+def application_version() -> str:
+    try:
+        return resource_path("VERSION").read_text(encoding="ascii").strip()
+    except OSError:
+        return ""
+
+
 def app_icon() -> QIcon:
     return QIcon(str(resource_path("assets/app_icon.ico")))
 
@@ -254,7 +267,8 @@ def set_windows_app_user_model_id() -> None:
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Texture Browser")
+        version = QApplication.applicationVersion()
+        self.setWindowTitle(f"Texture Browser {version}" if version else "Texture Browser")
         self.resize(scale_px(1440, self), scale_px(900, self))
 
         self.scan_pool = QThreadPool(self)
@@ -268,7 +282,7 @@ class MainWindow(QMainWindow):
         self.export_pool = QThreadPool(self)
         self.export_pool.setMaxThreadCount(1)
         self.thumbnail_pool = QThreadPool(self)
-        self.thumbnail_pool.setMaxThreadCount(min(8, max(4, os.cpu_count() or 4)))
+        self.thumbnail_pool.setMaxThreadCount(min(8, max(2, (os.cpu_count() or 4) // 2)))
         self.settings = FavoritesStore()
         self.favorites_index_store = FavoritesIndexStore()
         self.current_scan: ScanWorker | None = None
@@ -282,7 +296,8 @@ class MainWindow(QMainWindow):
         self.items = []
         self._folder_items = []
         self._favorite_items = []
-        self._folder_scan_cache: dict[tuple[str, bool], list] = {}
+        self._folder_scan_cache: OrderedDict[tuple[str, bool], tuple[list, dict[str, int], float]] = OrderedDict()
+        self._folder_scan_cache_item_count = 0
         self._loading_cached_folder = False
         self._duplicate_first_keys: dict[str, tuple[Path, str]] = {}
         self._duplicate_hidden_keys: set[tuple[Path, str]] = set()
@@ -304,6 +319,10 @@ class MainWindow(QMainWindow):
         self._prefetch_timer.setSingleShot(True)
         self._prefetch_timer.setInterval(80)
         self._prefetch_timer.timeout.connect(self._request_prefetch_thumbnails)
+        self._search_filter_timer = QTimer(self)
+        self._search_filter_timer.setSingleShot(True)
+        self._search_filter_timer.setInterval(160)
+        self._search_filter_timer.timeout.connect(lambda: self.apply_filter(self.search_box.text()))
 
         self.folder_browser = FolderBrowser()
         self.folder_browser.folderSelected.connect(self.select_folder)
@@ -316,7 +335,7 @@ class MainWindow(QMainWindow):
         self.search_box.setPlaceholderText("Search files. Use commas for alternatives, or paste a folder/file path and press Enter...")
         self.search_box.setMinimumWidth(0)
         self.search_box.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self.search_box.textChanged.connect(self.apply_filter)
+        self.search_box.textChanged.connect(self._schedule_search_filter)
         self.search_box.returnPressed.connect(self.browse_to_search_path)
         self.favorites_search_checkbox = QCheckBox("Favorites")
         self.favorites_search_checkbox.toggled.connect(self._favorites_search_toggled)
@@ -342,6 +361,7 @@ class MainWindow(QMainWindow):
         self.grid.associatedRequested.connect(self.open_associated_viewer)
         self.grid.guessRequested.connect(self.open_guess_viewer)
         self.grid.materialSetRequested.connect(self.open_material_set_viewer)
+        self.grid.materialRendererRequested.connect(self.open_material_renderer)
         self.grid.validationRequested.connect(self.open_texture_validation)
         self.grid.channelInspectorRequested.connect(self.open_channel_inspector)
         self.grid.tagFileRequested.connect(self.add_tag_to_file)
@@ -369,7 +389,7 @@ class MainWindow(QMainWindow):
         self.extension_filter_box = QLineEdit()
         self.extension_filter_box.setPlaceholderText(".fbx")
         self.extension_filter_box.setMaximumWidth(scale_px(120, self))
-        self.extension_filter_box.textChanged.connect(lambda _text: self.apply_filter(self.search_box.text()))
+        self.extension_filter_box.textChanged.connect(self._schedule_search_filter)
         size_bar.addSpacing(18)
         self.extension_label = self._section_label("Extension")
         size_bar.addWidget(self.extension_label)
@@ -583,9 +603,18 @@ class MainWindow(QMainWindow):
         return (str(path.resolve()).lower(), self.sequence_grouping_enabled)
 
     def _load_cached_folder_scan(self, path: Path) -> bool:
-        cached_items = self._folder_scan_cache.get(self._folder_scan_cache_key(path))
-        if cached_items is None:
+        key = self._folder_scan_cache_key(path)
+        entry = self._folder_scan_cache.get(key)
+        if entry is None:
             return False
+        cached_items, directory_mtimes, cached_at = entry
+        if (
+            time.monotonic() - cached_at > FOLDER_SCAN_CACHE_TTL_SECONDS
+            or not self._folder_cache_directories_are_current(directory_mtimes)
+        ):
+            self._discard_folder_scan_cache_entry(key)
+            return False
+        self._folder_scan_cache.move_to_end(key)
         self._queued_folder = None
         self._prefetch_timer.stop()
         self._reset_thumbnail_queue()
@@ -597,6 +626,51 @@ class MainWindow(QMainWindow):
             self._apply_grid_filter(self.search_box.text(), show_status=False)
         self.status_bar.showMessage(f"Loading cached scan for {path}...")
         return True
+
+    @staticmethod
+    def _folder_cache_mtime_ns(path: Path) -> int | None:
+        try:
+            return path.stat().st_mtime_ns
+        except OSError:
+            return None
+
+    @classmethod
+    def _folder_cache_directories_are_current(cls, directory_mtimes: dict[str, int]) -> bool:
+        return all(
+            cls._folder_cache_mtime_ns(Path(directory)) == mtime_ns
+            for directory, mtime_ns in directory_mtimes.items()
+        )
+
+    @classmethod
+    def _folder_cache_directory_mtimes(cls, path: Path, items: list) -> dict[str, int]:
+        directories = {path, *(item.folder for item in items)}
+        signatures: dict[str, int] = {}
+        for directory in directories:
+            mtime_ns = cls._folder_cache_mtime_ns(directory)
+            if mtime_ns is not None:
+                signatures[str(directory.resolve())] = mtime_ns
+        return signatures
+
+    def _discard_folder_scan_cache_entry(self, key: tuple[str, bool]) -> None:
+        entry = self._folder_scan_cache.pop(key, None)
+        if entry is not None:
+            self._folder_scan_cache_item_count -= len(entry[0])
+
+    def _store_folder_scan_cache(self, path: Path, items: list) -> None:
+        directory_mtimes = self._folder_cache_directory_mtimes(path, items)
+        if not directory_mtimes:
+            return
+        key = self._folder_scan_cache_key(path)
+        self._discard_folder_scan_cache_entry(key)
+        cached_items = list(items)
+        self._folder_scan_cache[key] = (cached_items, directory_mtimes, time.monotonic())
+        self._folder_scan_cache_item_count += len(cached_items)
+        while self._folder_scan_cache and (
+            len(self._folder_scan_cache) > FOLDER_SCAN_CACHE_MAX_FOLDERS
+            or self._folder_scan_cache_item_count > FOLDER_SCAN_CACHE_MAX_ITEMS
+        ):
+            _, removed = self._folder_scan_cache.popitem(last=False)
+            self._folder_scan_cache_item_count -= len(removed[0])
 
     def _start_scan(self, path: Path) -> None:
         self._prefetch_timer.stop()
@@ -677,7 +751,7 @@ class MainWindow(QMainWindow):
         self._hide_scan_splash()
         self._scan_found_count = found_count
         if self.current_root is not None:
-            self._folder_scan_cache[self._folder_scan_cache_key(self.current_root)] = list(self._folder_items)
+            self._store_folder_scan_cache(self.current_root, self._folder_items)
         if self.current_root in self.favorites:
             self.favorites_index_store.save_index(self.current_root, self._folder_items, self.sequence_grouping_enabled)
             self._favorite_index_ready = False
@@ -1099,6 +1173,9 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(self, "CSV Export Error", message)
         self.status_bar.showMessage("Tag CSV export failed")
 
+    def _schedule_search_filter(self, _text: str = "") -> None:
+        self._search_filter_timer.start()
+
     def apply_filter(self, text: str) -> None:
         if self._using_favorites_search():
             if not self._ensure_favorites_items():
@@ -1124,7 +1201,7 @@ class MainWindow(QMainWindow):
 
     def _workflow_text_changed(self, _text: str) -> None:
         if self.workflow_filter_checkbox.isChecked():
-            self.apply_filter(self.search_box.text())
+            self._schedule_search_filter()
 
     def _combined_filter_predicate(self):
         size_predicate = self._size_filter_predicate()
@@ -1754,6 +1831,13 @@ class MainWindow(QMainWindow):
             "material set file(s)",
         )
 
+    def open_material_renderer(self, item) -> None:
+        texture_set = texture_set_for_item(item, self.items)
+        opened, message = launch_material_renderer(texture_set)
+        self.status_bar.showMessage(message)
+        if not opened:
+            QMessageBox.warning(self, "Material Renderer", message)
+
     def open_texture_validation(self, item) -> None:
         texture_set = texture_set_for_item(item, self.items)
         issues = validate_texture_set(texture_set)
@@ -2143,6 +2227,7 @@ def run() -> None:
     )
     app = QApplication(sys.argv)
     app.setApplicationName("Texture Browser")
+    app.setApplicationVersion(application_version())
     app.setOrganizationName("TextureBrowser")
     icon = app_icon()
     app.setWindowIcon(icon)

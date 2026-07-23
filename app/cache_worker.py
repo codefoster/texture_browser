@@ -68,12 +68,20 @@ class CacheWorker(QRunnable):
                 self.signals.finished.emit(0)
                 return
 
-            max_workers = min(8, max(2, os.cpu_count() or 4))
+            max_workers = min(4, max(2, (os.cpu_count() or 4) // 2))
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                pending = {
-                    executor.submit(self._cache_item, item, size): item
-                    for item in items_to_cache
-                }
+                item_iterator = iter(items_to_cache)
+                pending = {}
+
+                def fill_queue() -> None:
+                    while len(pending) < max_workers * 2:
+                        try:
+                            item = next(item_iterator)
+                        except StopIteration:
+                            break
+                        pending[executor.submit(self._cache_item, item, size)] = item
+
+                fill_queue()
                 while pending:
                     if self._cancelled:
                         self.signals.progress.emit("Cache canceled")
@@ -93,6 +101,7 @@ class CacheWorker(QRunnable):
                             self.signals.progress.emit(
                                 f"Caching medium thumbnails... {cached}/{len(items_to_cache)} items prepared"
                             )
+                    fill_queue()
 
             rebuild_library_manifest(self.root, items_to_cache, [size])
 

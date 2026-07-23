@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from bisect import bisect_right
 from pathlib import Path
 import re
 
 from PySide6.QtCore import QEvent, QMimeData, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QAction, QIcon
+from PySide6.QtGui import QAction, QIcon, QImage, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -29,6 +30,7 @@ class ThumbnailGrid(QListWidget):
     associatedRequested = Signal(MediaItem)
     guessRequested = Signal(MediaItem)
     materialSetRequested = Signal(MediaItem)
+    materialRendererRequested = Signal(MediaItem)
     validationRequested = Signal(MediaItem)
     channelInspectorRequested = Signal(MediaItem)
     tagFileRequested = Signal(MediaItem)
@@ -52,6 +54,7 @@ class ThumbnailGrid(QListWidget):
         self._extension_filters: set[str] = set()
         self._extra_filter = None
         self._visible_count = 0
+        self._visible_rows: list[int] = []
         self._visible_timer = QTimer(self)
         self._visible_timer.setSingleShot(True)
         self._visible_timer.setInterval(60)
@@ -64,6 +67,7 @@ class ThumbnailGrid(QListWidget):
         self.setViewMode(QListWidget.IconMode)
         self.setResizeMode(QListWidget.Adjust)
         self.setMovement(QListWidget.Static)
+        self.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
         self.setSpacing(scale_px(8, self))
         self.setUniformItemSizes(True)
         self.setWordWrap(True)
@@ -129,6 +133,7 @@ class ThumbnailGrid(QListWidget):
         self._pending_items = []
         self._added_count = 0
         self._visible_count = 0
+        self._visible_rows = []
         self._active_populate_batch_size = self._populate_batch_size
 
     def apply_filter(self, text: str, extension_filter: str = "", extra_filter=None) -> None:
@@ -137,7 +142,7 @@ class ThumbnailGrid(QListWidget):
         self._filter_groups = self._parse_filter_groups(query)
         self._extension_filters = self._parse_extension_filters(extension_filter)
         self._extra_filter = extra_filter
-        visible_count = 0
+        visible_rows: list[int] = []
         self.setUpdatesEnabled(False)
         try:
             for row in range(self.count()):
@@ -147,17 +152,19 @@ class ThumbnailGrid(QListWidget):
                 if item.isHidden() != hidden:
                     item.setHidden(hidden)
                 if not hidden:
-                    visible_count += 1
+                    visible_rows.append(row)
         finally:
             self.setUpdatesEnabled(True)
-        self._visible_count = visible_count
+        self._visible_rows = visible_rows
+        self._visible_count = len(visible_rows)
         self.schedule_visible_refresh()
 
-    def set_thumbnail(self, path_key: str, pixmap) -> None:
+    def set_thumbnail(self, path_key: str, thumbnail) -> None:
         path = Path(path_key)
         item = self._item_map.get(path)
         if item is None:
             return
+        pixmap = QPixmap.fromImage(thumbnail) if isinstance(thumbnail, QImage) else thumbnail
         item.setIcon(QIcon(pixmap))
         self._loaded_paths.add(path)
 
@@ -175,11 +182,11 @@ class ThumbnailGrid(QListWidget):
         if not visible_rows:
             return []
         bottom_row = visible_rows[-1]
-        next_start = bottom_row + 1
-        next_end = min(self.count() - 1, bottom_row + self._prefetch_chunk_size)
-        if next_start <= next_end:
-            return self._collect_unloaded_items(next_start, next_end)
-        return []
+        next_visible_index = bisect_right(self._visible_rows, bottom_row)
+        prefetch_rows = self._visible_rows[
+            next_visible_index : next_visible_index + self._prefetch_chunk_size
+        ]
+        return self._collect_unloaded_rows(prefetch_rows)
 
     def _apply_size(self) -> None:
         size_hint = self._item_size_hint()
@@ -214,13 +221,7 @@ class ThumbnailGrid(QListWidget):
         return len(self._items)
 
     def filtered_items(self) -> list[MediaItem]:
-        items: list[MediaItem] = []
-        for row in range(self.count()):
-            item = self.item(row)
-            if item.isHidden():
-                continue
-            items.append(item.data(Qt.UserRole))
-        return items
+        return [self.item(row).data(Qt.UserRole) for row in self._visible_rows]
 
     def selected_media_items(self) -> list[MediaItem]:
         items: list[MediaItem] = []
@@ -311,6 +312,8 @@ class ThumbnailGrid(QListWidget):
         associated_action = QAction("Select workflow", self)
         guess_action = QAction("Guess", self)
         material_set_action = QAction("Material set", self)
+        material_renderer_action = QAction("Open material renderer", self)
+        material_renderer_action.setEnabled(not media_item.is_video and not media_item.is_model)
         validate_action = QAction("Validate texture set", self)
         channel_action = QAction("Channel inspector", self)
         tag_file_action = QAction("Tag file...", self)
@@ -323,6 +326,7 @@ class ThumbnailGrid(QListWidget):
         associated_action.triggered.connect(lambda: self.associatedRequested.emit(media_item))
         guess_action.triggered.connect(lambda: self.guessRequested.emit(media_item))
         material_set_action.triggered.connect(lambda: self.materialSetRequested.emit(media_item))
+        material_renderer_action.triggered.connect(lambda: self.materialRendererRequested.emit(media_item))
         validate_action.triggered.connect(lambda: self.validationRequested.emit(media_item))
         channel_action.triggered.connect(lambda: self.channelInspectorRequested.emit(media_item))
         tag_file_action.triggered.connect(lambda: self.tagFileRequested.emit(media_item))
@@ -339,6 +343,7 @@ class ThumbnailGrid(QListWidget):
         menu.addAction(associated_action)
         menu.addAction(guess_action)
         menu.addAction(material_set_action)
+        menu.addAction(material_renderer_action)
         menu.addAction(validate_action)
         menu.addAction(channel_action)
         menu.addSeparator()
@@ -375,9 +380,11 @@ class ThumbnailGrid(QListWidget):
                 widget_item.setSizeHint(size_hint)
                 widget_item.setIcon(self._placeholder_icon(media_item))
                 hidden = self._is_hidden_by_filter(media_item)
+                row = self.count()
                 self.addItem(widget_item)
                 widget_item.setHidden(hidden)
                 if not hidden:
+                    self._visible_rows.append(row)
                     self._visible_count += 1
                 self._item_map[media_item.preview_path] = widget_item
         finally:
@@ -396,16 +403,18 @@ class ThumbnailGrid(QListWidget):
         return icon
 
     def _visible_row_indexes(self) -> list[int]:
-        viewport_rect = self.viewport().rect()
-        rows: list[int] = []
-        for row in range(self.count()):
-            item = self.item(row)
-            if item.isHidden():
-                continue
-            item_rect = self.visualItemRect(item)
-            if item_rect.isValid() and item_rect.intersects(viewport_rect):
-                rows.append(row)
-        return rows
+        if not self._visible_rows:
+            return []
+        cell_size = self.gridSize()
+        cell_width = max(1, cell_size.width())
+        cell_height = max(1, cell_size.height())
+        columns = max(1, self.viewport().width() // cell_width)
+        scroll_y = max(0, self.verticalScrollBar().value())
+        first_visual_row = max(0, scroll_y // cell_height - 1)
+        visual_row_count = (self.viewport().height() + cell_height - 1) // cell_height + 3
+        start = first_visual_row * columns
+        end = min(len(self._visible_rows), (first_visual_row + visual_row_count) * columns)
+        return self._visible_rows[start:end]
 
     def _collect_unloaded_visible_items(self) -> list[MediaItem]:
         items: list[MediaItem] = []
@@ -417,12 +426,10 @@ class ThumbnailGrid(QListWidget):
             items.append(media_item)
         return items
 
-    def _collect_unloaded_items(self, start_row: int, end_row: int) -> list[MediaItem]:
+    def _collect_unloaded_rows(self, rows: list[int]) -> list[MediaItem]:
         items: list[MediaItem] = []
-        for row in range(start_row, end_row + 1):
+        for row in rows:
             item = self.item(row)
-            if item.isHidden():
-                continue
             media_item = item.data(Qt.UserRole)
             if media_item.preview_path in self._loaded_paths:
                 continue
