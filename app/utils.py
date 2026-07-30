@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 from pathlib import Path
@@ -175,7 +176,37 @@ def is_supported_media(path: Path) -> bool:
 
 
 def is_drive_root(path: Path) -> bool:
-    return bool(path.drive and path.root and path.parent == path)
+    """Heuristic guard against scanning a whole volume.
+
+    True for filesystem roots ("C:\\", "/") and for direct children of the
+    common POSIX mount parents ("/Volumes/T7", "/mnt/c", "/media/usb0",
+    "/media/<user>/<volume>"). Deliberately not ``os.path.ismount`` — that
+    would also block scanning legitimately mounted network libraries at
+    their mount point.
+    """
+    resolved = path.resolve()
+    if resolved.parent == resolved:
+        return True
+    if sys.platform == "win32":
+        return False
+    parent = resolved.parent
+    if parent in (Path("/Volumes"), Path("/mnt"), Path("/media")):
+        return True
+    if parent.parent == Path("/media"):
+        return True
+    return False
+
+
+def normalize_path_key(path: Path) -> str:
+    """Stable string identity for a path, for cache/dedupe keys.
+
+    Lowercases only on platforms whose default filesystems are
+    case-insensitive; on Linux, distinct case means distinct paths.
+    """
+    text = str(path.resolve())
+    if sys.platform in ("win32", "darwin"):
+        return text.lower()
+    return text
 
 
 def media_kind_for_path(path: Path) -> str:
