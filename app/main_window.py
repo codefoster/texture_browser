@@ -349,6 +349,9 @@ class MainWindow(QMainWindow):
         self.browse_path_button.clicked.connect(self.browse_to_search_path)
         self.seek_button = QPushButton("Seek")
         self.seek_button.clicked.connect(self.seek_selected_item)
+        self.material_preview_button = QPushButton("Material Viewer")
+        self.material_preview_button.setToolTip("Open the material/object viewer for the selected texture set.")
+        self.material_preview_button.clicked.connect(self.open_selected_material_renderer)
 
         self.grid = ThumbnailGrid()
         self.grid.itemActivated.connect(self.open_viewer)
@@ -450,6 +453,7 @@ class MainWindow(QMainWindow):
         search_row.addWidget(self.search_box, 1)
         search_row.addWidget(self.browse_path_button)
         search_row.addWidget(self.seek_button)
+        search_row.addWidget(self.material_preview_button)
         right_layout.addLayout(search_row)
         right_layout.addLayout(size_bar)
         right_layout.addWidget(self.info_label)
@@ -481,10 +485,14 @@ class MainWindow(QMainWindow):
         cache_here_button.clicked.connect(self.cache_current_root)
         self.export_tag_csv_button = QPushButton("Export CSV")
         self.export_tag_csv_button.clicked.connect(self.export_tag_csv)
+        self.material_viewer_toolbar_button = QPushButton("Material Viewer")
+        self.material_viewer_toolbar_button.setToolTip("Open the material/object viewer for the selected texture set.")
+        self.material_viewer_toolbar_button.clicked.connect(self.open_selected_material_renderer)
         toolbar.addWidget(choose_root)
         toolbar.addWidget(cancel_button)
         toolbar.addWidget(cache_here_button)
         toolbar.addWidget(self.export_tag_csv_button)
+        toolbar.addWidget(self.material_viewer_toolbar_button)
 
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
@@ -949,6 +957,15 @@ class MainWindow(QMainWindow):
         if any((item.preview_path, item.display_name) == clicked_key for item in selected_items):
             return selected_items
         return [clicked_item]
+
+    def _focused_media_item(self):
+        selected_items = self.grid.selected_media_items()
+        if selected_items:
+            return selected_items[0]
+        current = self.grid.currentItem()
+        if current is None:
+            return None
+        return current.data(Qt.UserRole)
 
     def _add_tag_to_items(self, tag_name: str, items: list, scope: str, set_key: str = "") -> int:
         tagged_count = 0
@@ -1830,6 +1847,16 @@ class MainWindow(QMainWindow):
             "Material Set",
             "material set file(s)",
         )
+
+    def open_selected_material_renderer(self) -> None:
+        item = self._focused_media_item()
+        if item is None:
+            self.status_bar.showMessage("Select a texture first.")
+            return
+        if item.is_video or item.is_model:
+            self.status_bar.showMessage("Material preview works on image textures.")
+            return
+        self.open_material_renderer(item)
 
     def open_material_renderer(self, item) -> None:
         texture_set = texture_set_for_item(item, self.items)
