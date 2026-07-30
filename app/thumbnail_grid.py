@@ -16,7 +16,8 @@ from PySide6.QtWidgets import (
 
 from app.models import MediaItem
 from app.thumbnailer import build_placeholder
-from app.utils import format_type_label, open_in_explorer, scale_px
+from app.platform_services import file_manager_name, reveal_in_file_manager
+from app.utils import format_type_label, scale_px
 
 
 class ThumbnailGrid(QListWidget):
@@ -316,7 +317,7 @@ class ThumbnailGrid(QListWidget):
         tag_file_action = QAction("Tag file...", self)
         tag_material_set_action = QAction("Tag material set...", self)
         remove_tag_action = QAction("Remove tag...", self)
-        open_action = QAction("Open file location", self)
+        open_action = QAction(f"Reveal in {file_manager_name()}", self)
         copy_file_action = QAction("Copy file path", self)
         copy_folder_action = QAction("Copy folder path", self)
 
@@ -328,7 +329,7 @@ class ThumbnailGrid(QListWidget):
         tag_file_action.triggered.connect(lambda: self.tagFileRequested.emit(media_item))
         tag_material_set_action.triggered.connect(lambda: self.tagMaterialSetRequested.emit(media_item))
         remove_tag_action.triggered.connect(lambda: self.removeTagRequested.emit(media_item))
-        open_action.triggered.connect(lambda: open_in_explorer(media_item.preview_path))
+        open_action.triggered.connect(lambda: reveal_in_file_manager(media_item.preview_path))
         copy_file_action.triggered.connect(
             lambda: QApplication.clipboard().setText(str(media_item.preview_path))
         )

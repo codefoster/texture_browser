@@ -50,13 +50,19 @@ from app.tag_store import TagStore, normalize_tag_name, tag_database_exists
 from app.thumbnail_grid import ThumbnailGrid
 from app.thumbnailer import ThumbnailWorker
 from app.texture_sets import texture_set_for_item, validate_texture_set
+from app.platform_services import (
+    fbx_handler_hint,
+    open_folder,
+    open_model_in_viewer,
+    open_video_in_vlc,
+    open_with_default_app,
+    vlc_install_hint,
+)
 from app.utils import (
     format_type_label,
     find_library_cache_root,
     is_drive_root,
-    open_fbx_in_viewer,
-    open_folder_in_explorer,
-    open_video_in_vlc,
+    normalize_path_key,
     scale_px,
 )
 from app.validation_report import TextureSetValidationDialog
@@ -210,7 +216,8 @@ def resource_path(relative_path: str) -> Path:
 
 
 def app_icon() -> QIcon:
-    return QIcon(str(resource_path("assets/app_icon.ico")))
+    icon_name = "app_icon.ico" if sys.platform == "win32" else "app_icon.png"
+    return QIcon(str(resource_path(f"assets/{icon_name}")))
 
 
 def app_splash_pixmap() -> QPixmap:
@@ -580,7 +587,7 @@ class MainWindow(QMainWindow):
         self._start_scan(path)
 
     def _folder_scan_cache_key(self, path: Path) -> tuple[str, bool]:
-        return (str(path.resolve()).lower(), self.sequence_grouping_enabled)
+        return (normalize_path_key(path), self.sequence_grouping_enabled)
 
     def _load_cached_folder_scan(self, path: Path) -> bool:
         cached_items = self._folder_scan_cache.get(self._folder_scan_cache_key(path))
@@ -1657,30 +1664,36 @@ class MainWindow(QMainWindow):
             index += 1
 
     def open_folder_location(self, path: Path) -> None:
-        open_folder_in_explorer(path)
-        self.status_bar.showMessage(f"Opened folder: {path}")
+        if open_folder(path):
+            self.status_bar.showMessage(f"Opened folder: {path}")
+        else:
+            self.status_bar.showMessage(f"Could not open folder: {path}")
 
     def open_viewer(self, item) -> None:
         if item.is_video:
             if open_video_in_vlc(item.preview_path):
                 self.status_bar.showMessage(f"Opening in VLC: {item.preview_path.name}")
+            elif open_with_default_app(item.preview_path):
+                self.status_bar.showMessage(
+                    f"Opening in default video player: {item.preview_path.name}"
+                )
             else:
                 QMessageBox.warning(
                     self,
                     "VLC Not Found",
-                    "VLC could not be found. Install VLC or add vlc.exe to PATH, then try again.",
+                    f"VLC could not be found. {vlc_install_hint()}",
                 )
             return
 
         if item.is_model:
-            viewer_name = open_fbx_in_viewer(item.preview_path)
+            viewer_name = open_model_in_viewer(item.preview_path)
             if viewer_name:
                 self.status_bar.showMessage(f"Opening FBX in {viewer_name}: {item.preview_path.name}")
             else:
                 QMessageBox.warning(
                     self,
                     "FBX Viewer Not Found",
-                    "No FBX viewer could be found. Install Blender or set a default app for .fbx files.",
+                    f"No FBX viewer could be found. {fbx_handler_hint()}",
                 )
             return
 
@@ -2142,8 +2155,13 @@ def run() -> None:
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
     app = QApplication(sys.argv)
+    # Load-bearing identity strings: they determine the QStandardPaths
+    # app-data location (thumbnail cache) for existing installs. The
+    # QSettings("TextureBrowser", "TextureBrowser") store in favorites.py
+    # is intentionally separate; do not "unify" either without migration.
     app.setApplicationName("Texture Browser")
     app.setOrganizationName("TextureBrowser")
+    app.setDesktopFileName("texturebrowser")
     icon = app_icon()
     app.setWindowIcon(icon)
     app.setStyle("Fusion")
