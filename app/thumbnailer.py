@@ -6,11 +6,20 @@ from pathlib import Path
 import threading
 
 from PySide6.QtCore import QObject, QRunnable, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QImage, QImageReader, QPainter, QPen, QPixmap
+from PySide6.QtGui import (
+    QColor,
+    QFontDatabase,
+    QImage,
+    QImageReader,
+    QPainter,
+    QPen,
+    QPixmap,
+)
 
 from app.models import MediaItem
 from app.utils import (
     IMAGE_EXTENSIONS,
+    LIBRARY_CACHE_DIRNAME,
     cache_dir,
     cache_key,
     ensure_library_cache,
@@ -169,7 +178,7 @@ def _preferred_cache_path(source_path: Path, size: int) -> Path:
         library_key = cache_key(source_path, library_root)
         return library_dir / f"{library_key}_{size}.png"
 
-    parent_cache_dir = source_path.parent / ".texturebrowser-cache"
+    parent_cache_dir = source_path.parent / LIBRARY_CACHE_DIRNAME
     if parent_cache_dir.exists():
         library_dir = ensure_library_cache(source_path.parent)
         library_key = cache_key(source_path, source_path.parent)
@@ -307,7 +316,8 @@ def build_placeholder(label: str, size: int, video: bool = False) -> QPixmap:
     painter.setPen(QPen(QColor("#4f5b66"), 1))
     painter.drawRoundedRect(4, 4, size - 8, size - 8, 8, 8)
     painter.setPen(QColor("#d9dde3"))
-    font = QFont("Segoe UI", max(9, size // 8))
+    font = QFontDatabase.systemFont(QFontDatabase.GeneralFont)
+    font.setPointSize(max(9, size // 8))
     font.setBold(True)
     painter.setFont(font)
     painter.drawText(pixmap.rect(), Qt.AlignCenter, label.replace(".", "").upper())

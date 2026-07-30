@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from app.utils import scale_px
+from app.utils import is_drive_root, scale_px
 
 
 class StableFolderIconProvider(QFileIconProvider):
@@ -47,7 +47,7 @@ def _folder_icon_for_path(path: Path):
     style = QApplication.style()
     if style is None:
         return None
-    if path.drive and path.parent == path:
+    if is_drive_root(path):
         return style.standardIcon(QStyle.SP_DriveHDIcon)
     return style.standardIcon(QStyle.SP_DirIcon)
 
