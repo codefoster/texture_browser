@@ -1,10 +1,10 @@
 # Texture Browser
 
-A lightweight Windows-oriented texture and media browser built with Python and PySide6. It scans folders in the background, groups image sequences, caches thumbnails on disk, and opens a simple internal viewer for images, sequences, and video items.
+A lightweight cross-platform (Windows/macOS/Linux) texture and media browser built with Python and PySide6. It scans folders in the background, groups image sequences, caches thumbnails on disk, and opens a simple internal viewer for images, sequences, and video items.
 
 ## Features
 
-- Windows-style folder tree with a persistent favorites section.
+- Folder tree with a persistent favorites section.
 - Recursive media scanning with background workers.
 - Thumbnail grid with Tiny, Small, Medium, and Large sizing.
 - Extension filter for narrowing results to types like `.fbx`, `.png`, or `.exr`.
@@ -13,10 +13,10 @@ A lightweight Windows-oriented texture and media browser built with Python and P
 - Search filtering across name, folder path, extension, and sequence pattern.
 - Disk-based thumbnail cache keyed by file path, size, modified time, and file size.
 - Naming convention presets for quickly switching associated-texture matching terms.
-- Context menu actions for opening Explorer, copying the file path, and copying the folder path.
+- Context menu actions for revealing files in Explorer/Finder/your file manager, copying the file path, and copying the folder path.
 - Internal image viewer with fit-to-window zoom and frame stepping for sequences.
-- Video double-click handoff to VLC.
-- FBX double-click handoff to Blender or the default FBX app.
+- Video double-click handoff to VLC, falling back to the OS default video player.
+- FBX double-click handoff to the OS default app for `.fbx` (e.g. Blender if you associate it).
 - (and more!)
 
 ## Project Layout
@@ -26,44 +26,83 @@ texture_browser/
   main.py
   app/
     __init__.py
+    associated_browser.py
+    cache_worker.py
+    channel_inspector.py
     favorites.py
+    favorites_index.py
     folder_tree.py
     main_window.py
+    media_dimensions.py
     models.py
+    naming_presets.py
+    platform_services.py
     scanner.py
     sequence_detector.py
+    size_filter_worker.py
+    tag_csv_exporter.py
+    tag_store.py
+    texture_sets.py
     thumbnail_grid.py
     thumbnailer.py
     utils.py
+    validation_report.py
     viewer.py
+    workflow_filter.py
+  assets/
+  TextureBrowser.spec
   requirements.txt
   README.md
 ```
 
 ## Install
 
-1. Create and activate a virtual environment.
-2. Install the base dependencies:
+From the repo root, create a virtual environment and install the base dependencies.
+
+Windows (PowerShell):
 
 ```powershell
-cd "C:\Users\jonis\Documents\New project\texture_browser"
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
 
-3. Install optional dependencies if you want broader preview support:
+macOS / Linux (bash):
 
-```powershell
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+Install optional dependencies if you want broader preview support:
+
+```bash
 pip install imageio psd-tools opencv-python-headless
 ```
 
 ## Run
 
-```powershell
-cd "C:\Users\jonis\Documents\New project\texture_browser"
+```bash
 python main.py
 ```
+
+## External tools (optional)
+
+- **VLC** for video playback: found via `PATH` on all platforms, plus the standard install locations (`Program Files` on Windows, `/Applications` on macOS, system paths/snap/flatpak on Linux). Without VLC, videos open in the OS default player.
+- **FBX viewer**: `.fbx` files open with whatever app your OS associates with the extension (Blender works well once associated).
+- On Linux, "Reveal in File Manager" uses the DBus `org.freedesktop.FileManager1` interface with an open-folder fallback.
+
+## Packaging
+
+A single PyInstaller spec builds a standalone app on each platform:
+
+```bash
+pip install pyinstaller
+pyinstaller TextureBrowser.spec
+```
+
+On Windows this produces `dist/TextureBrowser.exe`, on macOS `dist/TextureBrowser.app`, and on Linux a `dist/TextureBrowser` binary.
 
 ## Format Support
 
@@ -80,7 +119,7 @@ Supported when optional libraries are available:
 - `.tga`, `.hdr`, `.exr`: usually through `imageio` and its backend support
 - `.psd`: through `psd-tools`
 - `.mp4`, `.mov`, `.avi`, `.mkv`, `.webm` thumbnail extraction: through `opencv-python-headless`
-- `.fbx`: listed in the browser with a model placeholder; double-click opens Blender when available
+- `.fbx`: listed in the browser with a model placeholder; double-click opens the OS default `.fbx` app
 
 Graceful fallback behavior:
 
@@ -90,7 +129,7 @@ Graceful fallback behavior:
 
 ## Notes
 
-- Favorites and UI preferences are stored with `QSettings`.
+- Favorites and UI preferences are stored with `QSettings` (registry on Windows, plist on macOS, `~/.config` on Linux).
 - Thumbnail cache files are stored under the app data directory used by Qt for the current user.
 - Video playback is not included in this first version. Videos open in the internal viewer with file information and preview imagery where thumbnail extraction succeeds.
 - The scan cancel action is cooperative. Large directory walks stop on the next cancel checkpoint.
