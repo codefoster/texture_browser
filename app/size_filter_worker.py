@@ -30,7 +30,7 @@ class SizeFilterWorker(QRunnable):
             for index, item in enumerate(self.items, start=1):
                 if self._cancelled:
                     return
-                dimensions = media_dimensions(item.preview_path)
+                dimensions = media_dimensions(item.preview_path, item.metadata)
                 if dimensions is None:
                     failed_paths.append(str(item.preview_path))
                 else:

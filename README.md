@@ -1,5 +1,7 @@
 # Texture Browser
 
+Current development version: 0.2.0-beta.1
+
 A lightweight cross-platform (Windows/macOS/Linux) texture and media browser built with Python and PySide6. It scans folders in the background, groups image sequences, caches thumbnails on disk, and opens a simple internal viewer for images, sequences, and video items.
 
 ## Features
@@ -10,8 +12,11 @@ A lightweight cross-platform (Windows/macOS/Linux) texture and media browser bui
 - Extension filter for narrowing results to types like `.fbx`, `.png`, or `.exr`.
 - Default results show images and image sequences; videos and models appear when their extension is typed.
 - Image sequence grouping for names like `smoke_0001.tga` and `wood_diffuse.1001.exr`.
-- Search filtering across name, folder path, extension, and sequence pattern.
+- Debounced filename-only search with comma-separated alternatives.
 - Disk-based thumbnail cache keyed by file path, size, modified time, and file size.
+- Change-aware, bounded folder and Favorites indexes for fast revisits without unbounded RAM growth.
+- Persistent image-dimension cache for fast repeat size filtering.
+- Right-click material-renderer launch with automatic PBR map assignment.
 - Naming convention presets for quickly switching associated-texture matching terms.
 - Context menu actions for revealing files in Explorer/Finder/your file manager, copying the file path, and copying the folder path.
 - Internal image viewer with fit-to-window zoom and frame stepping for sequences.
@@ -32,6 +37,7 @@ texture_browser/
     favorites.py
     favorites_index.py
     folder_tree.py
+    godot_renderer.py
     main_window.py
     media_dimensions.py
     models.py
@@ -50,7 +56,10 @@ texture_browser/
     viewer.py
     workflow_filter.py
   assets/
+  godot_material_renderer/
+  tests/
   TextureBrowser.spec
+  VERSION
   requirements.txt
   README.md
 ```
@@ -133,3 +142,15 @@ Graceful fallback behavior:
 - Thumbnail cache files are stored under the app data directory used by Qt for the current user.
 - Video playback is not included in this first version. Videos open in the internal viewer with file information and preview imagery where thumbnail extraction succeeds.
 - The scan cancel action is cooperative. Large directory walks stop on the next cancel checkpoint.
+
+
+## Lightweight Verification
+
+~~~powershell
+python -m compileall -q app main.py
+python -m unittest discover -s tests -v
+~~~
+
+The Godot renderer can be exported separately and is included automatically by
+TextureBrowser.spec when its exported files exist under
+godot_material_renderer/build/.

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, Signal
@@ -11,7 +12,8 @@ from app.models import MediaItem, MediaKind, SequenceInfo
 from app.sequence_detector import build_media_items, normalize_grouped_sequence_items
 from app.utils import app_data_dir, is_cache_folder, is_supported_media
 
-INDEX_VERSION = 2
+INDEX_VERSION = 3
+INDEX_MAX_AGE_NS = 60 * 60 * 1_000_000_000
 
 
 class FavoritesIndexWorkerSignals(QObject):
@@ -36,9 +38,8 @@ class FavoritesIndexWorker(QRunnable):
                 if not root.exists():
                     continue
                 self.signals.progress.emit(f"Loading favorites index: {root}")
-                if self.store.has_index(root, self.group_sequences):
-                    items = self.store.load_index(root, self.group_sequences)
-                else:
+                items = self.store.load_index(root, self.group_sequences)
+                if items is None:
                     self.signals.progress.emit(f"Building favorites index: {root}")
                     items = self.store.build_index(root, self.group_sequences, self.signals.progress.emit)
                     self.store.save_index(root, items, self.group_sequences)
@@ -57,24 +58,26 @@ class FavoritesIndexStore:
         self.root.mkdir(parents=True, exist_ok=True)
 
     def has_index(self, root: Path, group_sequences: bool = True) -> bool:
-        return self._index_path(root, group_sequences).exists()
+        return self.load_index(root, group_sequences) is not None
 
-    def load_index(self, root: Path, group_sequences: bool = True) -> list[MediaItem]:
+    def load_index(self, root: Path, group_sequences: bool = True) -> list[MediaItem] | None:
         index_path = self._index_path(root, group_sequences)
         if not index_path.exists():
-            return []
+            return None
         try:
             payload = json.loads(index_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            return []
+            return None
         if not isinstance(payload, dict):
-            return []
+            return None
         if payload.get("version") != INDEX_VERSION:
-            return []
+            return None
+        if not self._payload_is_fresh(root, payload):
+            return None
 
         items_payload = payload.get("items", [])
         if not isinstance(items_payload, list):
-            return []
+            return None
 
         items: list[MediaItem] = []
         for item_payload in items_payload:
@@ -90,11 +93,50 @@ class FavoritesIndexStore:
         payload = {
             "version": INDEX_VERSION,
             "root": str(root),
+            "root_mtime_ns": self._root_mtime_ns(root),
+            "directory_mtimes": self._directory_mtimes(root, items),
+            "indexed_at_ns": time.time_ns(),
             "group_sequences": group_sequences,
             "items": [self._serialize_item(item) for item in items],
         }
         index_path = self._index_path(root, group_sequences)
-        index_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        temp_path = index_path.with_suffix(index_path.suffix + ".tmp")
+        temp_path.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+        os.replace(temp_path, index_path)
+
+    def _payload_is_fresh(self, root: Path, payload: dict) -> bool:
+        indexed_at_ns = payload.get("indexed_at_ns")
+        if not isinstance(indexed_at_ns, int) or time.time_ns() - indexed_at_ns > INDEX_MAX_AGE_NS:
+            return False
+        current_mtime_ns = self._root_mtime_ns(root)
+        if current_mtime_ns is None or payload.get("root_mtime_ns") != current_mtime_ns:
+            return False
+        directory_mtimes = payload.get("directory_mtimes")
+        if not isinstance(directory_mtimes, dict):
+            return False
+        for directory, expected_mtime_ns in directory_mtimes.items():
+            if not isinstance(directory, str) or not isinstance(expected_mtime_ns, int):
+                return False
+            if self._root_mtime_ns(Path(directory)) != expected_mtime_ns:
+                return False
+        return True
+
+    @classmethod
+    def _directory_mtimes(cls, root: Path, items: list[MediaItem]) -> dict[str, int]:
+        directories = {root, *(item.folder for item in items)}
+        signatures: dict[str, int] = {}
+        for directory in directories:
+            mtime_ns = cls._root_mtime_ns(directory)
+            if mtime_ns is not None:
+                signatures[str(directory.resolve())] = mtime_ns
+        return signatures
+
+    @staticmethod
+    def _root_mtime_ns(root: Path) -> int | None:
+        try:
+            return root.stat().st_mtime_ns
+        except OSError:
+            return None
 
     def build_index(self, root: Path, group_sequences: bool = True, progress_callback=None) -> list[MediaItem]:
         items: list[MediaItem] = []

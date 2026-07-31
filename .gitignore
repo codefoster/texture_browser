@@ -21,3 +21,6 @@ Thumbs.db
 .texturebrowser-cache/
 .idea/
 .vscode/
+
+godot_material_renderer/temp_material/
+preview_renderer/**/*.png
