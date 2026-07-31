@@ -65,11 +65,12 @@ class ThumbnailGrid(QListWidget):
         self._populate_timer.setInterval(0)
         self._populate_timer.timeout.connect(self._populate_next_batch)
 
+        self.setObjectName("thumbnailGrid")
         self.setViewMode(QListWidget.IconMode)
         self.setResizeMode(QListWidget.Adjust)
         self.setMovement(QListWidget.Static)
         self.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
-        self.setSpacing(scale_px(8, self))
+        self.setSpacing(scale_px(12, self))
         self.setUniformItemSizes(True)
         self.setWordWrap(True)
         self.setTextElideMode(Qt.ElideNone)

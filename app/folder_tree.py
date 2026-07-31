@@ -91,14 +91,22 @@ class FolderBrowser(QWidget):
         self.favorites_list.itemChanged.connect(self._on_favorite_changed)
 
         favorites_header = QHBoxLayout()
-        self.favorites_label = QLabel("Favorites")
-        self.favorites_label.setStyleSheet("QLabel { color: #5ea7ff; font-weight: 600; }")
+        header_margin = scale_px(10, self)
+        favorites_header.setContentsMargins(header_margin, scale_px(8, self), header_margin, scale_px(4, self))
+        self.favorites_label = QLabel("FAVORITES")
+        self.favorites_label.setProperty("variant", "kicker")
         favorites_header.addWidget(self.favorites_label)
-        self.add_favorite_button = QPushButton("Add")
+        favorites_header.addStretch(1)
+        self.add_favorite_button = QPushButton("+ Add")
         self.remove_favorite_button = QPushButton("Remove")
+        for button in (self.add_favorite_button, self.remove_favorite_button):
+            button.setFlat(True)
+            button.setCursor(Qt.PointingHandCursor)
+            button.setProperty("variant", "link")
         self.add_favorite_button.clicked.connect(self._emit_add_favorite)
         self.remove_favorite_button.clicked.connect(self._emit_remove_favorite)
         favorites_header.addWidget(self.add_favorite_button)
+        favorites_header.addSpacing(scale_px(10, self))
         favorites_header.addWidget(self.remove_favorite_button)
 
         self.model = FolderFileSystemModel(self)
@@ -131,7 +139,10 @@ class FolderBrowser(QWidget):
         folders_panel = QWidget()
         folders_layout = QVBoxLayout(folders_panel)
         folders_layout.setContentsMargins(0, 0, 0, 0)
-        folders_layout.addWidget(QLabel("Folders"))
+        self.folders_label = QLabel("FOLDERS")
+        self.folders_label.setProperty("variant", "kicker")
+        self.folders_label.setContentsMargins(header_margin, scale_px(8, self), header_margin, scale_px(4, self))
+        folders_layout.addWidget(self.folders_label)
         folders_layout.addWidget(self.tree, 1)
 
         self.vertical_splitter = QSplitter(Qt.Vertical)
@@ -156,14 +167,12 @@ class FolderBrowser(QWidget):
         self.favorites_list.blockSignals(True)
         self.favorites_list.clear()
         for path in favorites:
-            item = QListWidgetItem(str(path))
+            item = QListWidgetItem(f"★ {path}")
             item.setData(Qt.UserRole, path)
+            item.setToolTip(str(path))
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             checked = True if enabled_favorites is None else path in enabled_favorites
             item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
-            icon = _folder_icon_for_path(path)
-            if icon is not None:
-                item.setIcon(icon)
             self.favorites_list.addItem(item)
         self.favorites_list.blockSignals(False)
 

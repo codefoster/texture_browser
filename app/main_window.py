@@ -61,6 +61,7 @@ from app.platform_services import (
     open_with_default_app,
     vlc_install_hint,
 )
+from app.theme import apply_theme
 from app.utils import (
     format_type_label,
     find_library_cache_root,
@@ -357,6 +358,7 @@ class MainWindow(QMainWindow):
         self.seek_button = QPushButton("Seek")
         self.seek_button.clicked.connect(self.seek_selected_item)
         self.material_preview_button = QPushButton("Material Viewer")
+        self.material_preview_button.setProperty("variant", "primary")
         self.material_preview_button.setToolTip("Open the material/object viewer for the selected texture set.")
         self.material_preview_button.clicked.connect(self.open_selected_material_renderer)
 
@@ -379,6 +381,7 @@ class MainWindow(QMainWindow):
         self.grid.removeTagRequested.connect(self.remove_tag_from_item)
 
         size_bar = QHBoxLayout()
+        size_bar.setSpacing(scale_px(10, self))
         self.thumbnails_label = self._section_label("Thumbnails")
         size_bar.addWidget(self.thumbnails_label)
         self.size_buttons = {}
@@ -445,15 +448,14 @@ class MainWindow(QMainWindow):
         self.info_label = QLabel("Select an item to see file info.")
         self.info_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.info_label.setWordWrap(True)
-        self.info_label.setStyleSheet(
-            "QLabel { color: #d7dde5; background: #2f343a; border: 1px solid #4a5058; padding: 6px 8px; }"
-        )
+        self.info_label.setProperty("variant", "info")
 
         right_panel = QWidget()
         right_panel.setMinimumWidth(scale_px(100, self))
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
         search_row = QHBoxLayout()
+        search_row.setSpacing(scale_px(10, self))
         search_row.addWidget(self.favorites_search_checkbox)
         search_row.addWidget(self.sequence_grouping_checkbox)
         search_row.addWidget(self.hide_duplicates_checkbox)
@@ -476,7 +478,7 @@ class MainWindow(QMainWindow):
 
         container = QWidget()
         layout = QVBoxLayout(container)
-        margin = scale_px(8, self)
+        margin = scale_px(12, self)
         layout.setContentsMargins(margin, margin, margin, margin)
         layout.addWidget(splitter)
         self.setCentralWidget(container)
@@ -485,6 +487,7 @@ class MainWindow(QMainWindow):
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
         choose_root = QPushButton("Choose Root Folder")
+        choose_root.setProperty("variant", "primary")
         choose_root.clicked.connect(self.choose_root_folder)
         cancel_button = QPushButton("Cancel Scan")
         cancel_button.clicked.connect(self.cancel_scan_from_ui)
@@ -492,13 +495,20 @@ class MainWindow(QMainWindow):
         cache_here_button.clicked.connect(self.cache_current_root)
         self.export_tag_csv_button = QPushButton("Export CSV")
         self.export_tag_csv_button.clicked.connect(self.export_tag_csv)
+        self.theme_button = QPushButton("Light Mode" if self.settings.load_theme_mode() == "dark" else "Dark Mode")
+        self.theme_button.clicked.connect(self.toggle_theme)
         self.material_viewer_toolbar_button = QPushButton("Material Viewer")
+        self.material_viewer_toolbar_button.setProperty("variant", "primary")
         self.material_viewer_toolbar_button.setToolTip("Open the material/object viewer for the selected texture set.")
         self.material_viewer_toolbar_button.clicked.connect(self.open_selected_material_renderer)
         toolbar.addWidget(choose_root)
         toolbar.addWidget(cancel_button)
         toolbar.addWidget(cache_here_button)
         toolbar.addWidget(self.export_tag_csv_button)
+        toolbar.addWidget(self.theme_button)
+        toolbar_spacer = QWidget()
+        toolbar_spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        toolbar.addWidget(toolbar_spacer)
         toolbar.addWidget(self.material_viewer_toolbar_button)
 
         self.status_bar = QStatusBar()
@@ -570,19 +580,22 @@ class MainWindow(QMainWindow):
         self.extension_filter_box.blockSignals(False)
 
     def _section_label(self, text: str) -> QLabel:
-        label = QLabel(text)
-        label.setStyleSheet("QLabel { color: #5ea7ff; font-weight: 600; }")
+        label = QLabel(text.upper())
+        label.setProperty("variant", "kicker")
         return label
 
     def _section_button(self, text: str) -> QPushButton:
-        button = QPushButton(text)
+        button = QPushButton(text.upper())
         button.setFlat(True)
         button.setCursor(Qt.PointingHandCursor)
-        button.setStyleSheet(
-            "QPushButton { color: #5ea7ff; font-weight: 600; border: none; background: transparent; padding: 0px; }"
-            "QPushButton:hover { color: #7bb8ff; }"
-        )
+        button.setProperty("variant", "link")
         return button
+
+    def toggle_theme(self) -> None:
+        mode = "light" if self.settings.load_theme_mode() == "dark" else "dark"
+        self.settings.save_theme_mode(mode)
+        apply_theme(QApplication.instance(), mode)
+        self.theme_button.setText("Dark Mode" if mode == "light" else "Light Mode")
 
     def select_folder(self, path: Path) -> None:
         if not path.exists():
@@ -2277,6 +2290,7 @@ def run() -> None:
     icon = app_icon()
     app.setWindowIcon(icon)
     app.setStyle("Fusion")
+    apply_theme(app, FavoritesStore().load_theme_mode())
 
     startup_screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
     startup_splash = create_splash("Loading Texture Browser...", startup_screen)
