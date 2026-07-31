@@ -77,13 +77,27 @@ def _packed_layout(path: Path) -> str:
     return ""
 
 
+def _exported_renderer_names() -> list[str]:
+    if sys.platform == "win32":
+        return ["TextureBrowserMaterialRenderer.exe"]
+    if sys.platform == "darwin":
+        return [
+            "TextureBrowserMaterialRenderer.app/Contents/MacOS/TextureBrowserMaterialRenderer",
+            "TextureBrowserMaterialRenderer",
+        ]
+    return [
+        "TextureBrowserMaterialRenderer.x86_64",
+        "TextureBrowserMaterialRenderer",
+    ]
+
+
 def _renderer_command() -> tuple[list[str], Path] | None:
     bundle_root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
     project_path = bundle_root / "godot_material_renderer"
     exported_candidates = [
-        project_path / "TextureBrowserMaterialRenderer.exe",
-        project_path / "build" / "TextureBrowserMaterialRenderer.exe",
-        bundle_root / "TextureBrowserMaterialRenderer.exe",
+        base / name
+        for name in _exported_renderer_names()
+        for base in (project_path, project_path / "build", bundle_root)
     ]
     configured_renderer = os.environ.get("TEXTURE_BROWSER_RENDERER", "").strip()
     if configured_renderer:
@@ -123,4 +137,11 @@ def _find_godot() -> Path | None:
             )
             if matches:
                 return matches[0]
+    elif sys.platform == "darwin":
+        for candidate in (
+            Path("/Applications/Godot.app/Contents/MacOS/Godot"),
+            Path.home() / "Applications" / "Godot.app" / "Contents" / "MacOS" / "Godot",
+        ):
+            if candidate.is_file():
+                return candidate
     return None
