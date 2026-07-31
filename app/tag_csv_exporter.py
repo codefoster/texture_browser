@@ -8,7 +8,7 @@ from PySide6.QtCore import QObject, QRunnable, Signal
 from app.sequence_detector import build_media_items
 from app.tag_store import TagStore
 from app.texture_sets import ROLE_SORT_ORDER, detect_role, texture_set_for_item
-from app.utils import is_supported_media
+from app.utils import is_supported_media, normalize_path_key
 
 
 class TagCsvExportWorkerSignals(QObject):
@@ -84,7 +84,7 @@ class TagCsvExportWorker(QRunnable):
                 continue
 
             texture_set = texture_set_for_item(seed_item, folder_items)
-            export_key = (str(seed_item.folder.resolve()).lower(), texture_set.title.lower())
+            export_key = (normalize_path_key(seed_item.folder), texture_set.title.lower())
             if export_key in exported_keys:
                 continue
             exported_keys.add(export_key)

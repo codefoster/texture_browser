@@ -1,0 +1,17 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://scripts/material_preview.gd" id="1_script"]
+
+[sub_resource type="SphereMesh" id="1_sphere"]
+radius = 1.0
+height = 2.0
+radial_segments = 128
+rings = 64
+
+[node name="MaterialPreview" type="Node3D"]
+script = ExtResource("1_script")
+
+[node name="Sphere" type="MeshInstance3D" parent="."]
+mesh = SubResource("1_sphere")
+
+[node name="Camera3D" type="Camera3D" parent="."]

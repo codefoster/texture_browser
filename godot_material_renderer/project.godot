@@ -1,0 +1,22 @@
+; Engine configuration file.
+; This project is a tiny standalone material preview renderer for Texture Browser.
+
+config_version=5
+
+[application]
+
+config/name="Texture Browser Material Renderer"
+run/main_scene="res://scenes/material_preview.tscn"
+
+[debug]
+
+file_logging/enable_file_logging=false
+
+[display]
+
+window/size/viewport_width=768
+window/size/viewport_height=768
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
