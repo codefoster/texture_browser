@@ -30,6 +30,7 @@ a = Analysis(
         ('assets/app_icon.ico', 'assets'),
         ('assets/app_icon.png', 'assets'),
         ('assets/stollnation_cool_logo_for_a_program_called_Texture_Browser_ju_6450916f-8510-416e-ab27-ceb00f104fbc_0.png', 'assets'),
+        ('assets/fonts', 'assets/fonts'),
         *renderer_datas,
     ],
     hiddenimports=[],

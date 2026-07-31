@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### UI refresh (Modernist / Inspector layout)
+
+- New flat "Modernist" theme in dark and light modes: Archivo type, single red
+  accent, zero corner radius, 2px rules. Toggle via the ⋯ menu; persisted in
+  settings (`ui/theme`).
+- Reorganized the main window into a three-pane inspector layout: top bar with
+  breadcrumb, search, collapsible Filters row (active-count badge), and T/S/M/L
+  size buttons; sidebar with favorites pinned above the folder tree; new
+  right-hand Inspector panel with preview, metadata, tags, texture-set role
+  status, and actions (Material Viewer, Seek, Reveal, Validate).
+- Favorites add/remove moved to context menus on the folder tree and favorites
+  list; toolbar actions (Choose Root, Cache Here, Export CSV, Cancel Scan)
+  moved behind the ⋯ menu.
+- Status bar now shows the thumbnail cache size on the right.
+
 ## 0.2.0-beta.1
 
 ### Stability

@@ -8,11 +8,9 @@ from PySide6.QtWidgets import (
     QApplication,
     QFileIconProvider,
     QFileSystemModel,
-    QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
-    QPushButton,
     QMenu,
     QSplitter,
     QStyle,
@@ -89,17 +87,11 @@ class FolderBrowser(QWidget):
         self.favorites_list = QListWidget()
         self.favorites_list.itemDoubleClicked.connect(self._on_favorite_activated)
         self.favorites_list.itemChanged.connect(self._on_favorite_changed)
+        self.favorites_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.favorites_list.customContextMenuRequested.connect(self._show_favorites_context_menu)
 
-        favorites_header = QHBoxLayout()
-        self.favorites_label = QLabel("Favorites")
-        self.favorites_label.setStyleSheet("QLabel { color: #5ea7ff; font-weight: 600; }")
-        favorites_header.addWidget(self.favorites_label)
-        self.add_favorite_button = QPushButton("Add")
-        self.remove_favorite_button = QPushButton("Remove")
-        self.add_favorite_button.clicked.connect(self._emit_add_favorite)
-        self.remove_favorite_button.clicked.connect(self._emit_remove_favorite)
-        favorites_header.addWidget(self.add_favorite_button)
-        favorites_header.addWidget(self.remove_favorite_button)
+        self.favorites_label = QLabel("FAVORITES")
+        self.favorites_label.setProperty("variant", "kicker")
 
         self.model = FolderFileSystemModel(self)
         self.model.setIconProvider(StableFolderIconProvider(self.model))
@@ -122,16 +114,25 @@ class FolderBrowser(QWidget):
         self.tree.doubleClicked.connect(self._on_tree_double_clicked)
         self.tree.customContextMenuRequested.connect(self._show_tree_context_menu)
 
+        label_margin = scale_px(10, self)
+        self.favorites_label.setContentsMargins(label_margin, scale_px(10, self), label_margin, scale_px(4, self))
+
         favorites_panel = QWidget()
         favorites_layout = QVBoxLayout(favorites_panel)
         favorites_layout.setContentsMargins(0, 0, 0, 0)
-        favorites_layout.addLayout(favorites_header)
+        favorites_layout.setSpacing(0)
+        favorites_layout.addWidget(self.favorites_label)
         favorites_layout.addWidget(self.favorites_list, 1)
+
+        self.folders_label = QLabel("FOLDERS")
+        self.folders_label.setProperty("variant", "kicker")
+        self.folders_label.setContentsMargins(label_margin, scale_px(10, self), label_margin, scale_px(4, self))
 
         folders_panel = QWidget()
         folders_layout = QVBoxLayout(folders_panel)
         folders_layout.setContentsMargins(0, 0, 0, 0)
-        folders_layout.addWidget(QLabel("Folders"))
+        folders_layout.setSpacing(0)
+        folders_layout.addWidget(self.folders_label)
         folders_layout.addWidget(self.tree, 1)
 
         self.vertical_splitter = QSplitter(Qt.Vertical)
@@ -143,6 +144,7 @@ class FolderBrowser(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
         layout.addWidget(self.vertical_splitter, 1)
 
     def set_current_folder(self, folder: Path) -> None:
@@ -156,14 +158,12 @@ class FolderBrowser(QWidget):
         self.favorites_list.blockSignals(True)
         self.favorites_list.clear()
         for path in favorites:
-            item = QListWidgetItem(str(path))
+            item = QListWidgetItem(f"★ {path.name or str(path)}")
             item.setData(Qt.UserRole, path)
+            item.setToolTip(str(path))
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             checked = True if enabled_favorites is None else path in enabled_favorites
             item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
-            icon = _folder_icon_for_path(path)
-            if icon is not None:
-                item.setIcon(icon)
             self.favorites_list.addItem(item)
         self.favorites_list.blockSignals(False)
 
@@ -186,28 +186,35 @@ class FolderBrowser(QWidget):
         if not path.exists():
             return
         menu = QMenu(self)
+        add_favorite_action = QAction("Add to Favorites", self)
+        add_favorite_action.triggered.connect(lambda checked=False, folder=path: self.addFavoriteRequested.emit(folder))
+        menu.addAction(add_favorite_action)
         show_folder_action = QAction("Show Folder", self)
         show_folder_action.triggered.connect(lambda checked=False, folder=path: self.folderOpenRequested.emit(folder))
         menu.addAction(show_folder_action)
         menu.exec(self.tree.viewport().mapToGlobal(position))
+
+    def _show_favorites_context_menu(self, position: QPoint) -> None:
+        item = self.favorites_list.itemAt(position)
+        if item is None:
+            return
+        path = item.data(Qt.UserRole)
+        if not isinstance(path, Path):
+            return
+        menu = QMenu(self)
+        show_folder_action = QAction("Show Folder", self)
+        show_folder_action.triggered.connect(lambda checked=False, folder=path: self.folderOpenRequested.emit(folder))
+        menu.addAction(show_folder_action)
+        remove_action = QAction("Remove from Favorites", self)
+        remove_action.triggered.connect(lambda checked=False, folder=path: self.removeFavoriteRequested.emit(folder))
+        menu.addAction(remove_action)
+        menu.exec(self.favorites_list.viewport().mapToGlobal(position))
 
     def _on_favorite_activated(self, item: QListWidgetItem) -> None:
         path = item.data(Qt.UserRole)
         if isinstance(path, Path):
             self.set_current_folder(path)
             self.folderSelected.emit(path)
-
-    def _emit_add_favorite(self) -> None:
-        if self._current_folder:
-            self.addFavoriteRequested.emit(self._current_folder)
-
-    def _emit_remove_favorite(self) -> None:
-        item = self.favorites_list.currentItem()
-        if item is None:
-            return
-        path = item.data(Qt.UserRole)
-        if isinstance(path, Path):
-            self.removeFavoriteRequested.emit(path)
 
     def _on_favorite_changed(self, item: QListWidgetItem) -> None:
         path = item.data(Qt.UserRole)

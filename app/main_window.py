@@ -10,8 +10,8 @@ import sys
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QThreadPool, Qt, QTimer
-from PySide6.QtGui import QCursor, QGuiApplication, QIcon, QPixmap
+from PySide6.QtCore import QObject, QRunnable, QThreadPool, Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QCursor, QGuiApplication, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -19,11 +19,13 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QInputDialog,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QListWidget,
@@ -31,7 +33,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QSizePolicy,
     QStatusBar,
-    QToolBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -43,6 +45,7 @@ from app.favorites import FavoritesStore
 from app.favorites_index import FavoritesIndexStore, FavoritesIndexWorker
 from app.folder_tree import FolderBrowser
 from app.godot_renderer import launch_material_renderer
+from app.inspector_panel import InspectorPanel
 from app.media_dimensions import media_dimensions
 from app.models import THUMBNAIL_DIMENSIONS, ThumbnailSize
 from app.naming_presets import NamingPresetDialog
@@ -59,9 +62,12 @@ from app.platform_services import (
     open_model_in_viewer,
     open_video_in_vlc,
     open_with_default_app,
+    reveal_in_file_manager,
     vlc_install_hint,
 )
+from app.theme import apply_theme
 from app.utils import (
+    cache_dir,
     format_type_label,
     find_library_cache_root,
     is_drive_root,
@@ -271,6 +277,42 @@ def set_windows_app_user_model_id() -> None:
         pass
 
 
+class CacheSizeWorkerSignals(QObject):
+    finished = Signal(str)
+
+
+class CacheSizeWorker(QRunnable):
+    """Sums the global thumbnail cache size off the UI thread."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.signals = CacheSizeWorkerSignals()
+        self.setAutoDelete(True)
+
+    def run(self) -> None:
+        total = 0
+        try:
+            for entry in cache_dir().iterdir():
+                try:
+                    total += entry.stat().st_size
+                except OSError:
+                    continue
+        except OSError:
+            pass
+        self.signals.finished.emit(_human_byte_size(total))
+
+
+def _human_byte_size(size: int) -> str:
+    value = float(size)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if value < 1024 or unit == "TB":
+            if unit == "B":
+                return f"{int(value)} {unit}"
+            return f"{value:.1f} {unit}"
+        value /= 1024
+    return ""
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -330,6 +372,11 @@ class MainWindow(QMainWindow):
         self._search_filter_timer.setSingleShot(True)
         self._search_filter_timer.setInterval(160)
         self._search_filter_timer.timeout.connect(lambda: self.apply_filter(self.search_box.text()))
+        self._inspector_timer = QTimer(self)
+        self._inspector_timer.setSingleShot(True)
+        self._inspector_timer.setInterval(100)
+        self._inspector_timer.timeout.connect(self._refresh_inspector)
+        self._inspector_item_key: tuple[Path, str] | None = None
 
         self.folder_browser = FolderBrowser()
         self.folder_browser.folderSelected.connect(self.select_folder)
@@ -338,12 +385,18 @@ class MainWindow(QMainWindow):
         self.folder_browser.removeFavoriteRequested.connect(self.remove_favorite)
         self.folder_browser.favoriteSearchToggled.connect(self.set_favorite_search_enabled)
 
+        self.breadcrumb_label = QLabel("")
+        self.breadcrumb_label.setTextFormat(Qt.RichText)
+        self.breadcrumb_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+
         self.search_box = QLineEdit()
-        self.search_box.setPlaceholderText("Search files. Use commas for alternatives, or paste a folder/file path and press Enter...")
-        self.search_box.setMinimumWidth(0)
-        self.search_box.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.search_box.setPlaceholderText("Search files. Commas for alternatives; paste a path and press Enter...")
+        self.search_box.setMinimumWidth(scale_px(160, self))
+        self.search_box.setMaximumWidth(scale_px(520, self))
+        self.search_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.search_box.textChanged.connect(self._schedule_search_filter)
         self.search_box.returnPressed.connect(self.browse_to_search_path)
+
         self.favorites_search_checkbox = QCheckBox("Favorites")
         self.favorites_search_checkbox.toggled.connect(self._favorites_search_toggled)
         self.sequence_grouping_checkbox = QCheckBox("Sequences")
@@ -352,13 +405,34 @@ class MainWindow(QMainWindow):
         self.hide_duplicates_checkbox = QCheckBox("Hide duplicates")
         self.hide_duplicates_checkbox.setChecked(self.settings.load_hide_duplicates_enabled())
         self.hide_duplicates_checkbox.toggled.connect(self.set_hide_duplicates_enabled)
-        self.browse_path_button = QPushButton("Browse Path")
-        self.browse_path_button.clicked.connect(self.browse_to_search_path)
-        self.seek_button = QPushButton("Seek")
-        self.seek_button.clicked.connect(self.seek_selected_item)
-        self.material_preview_button = QPushButton("Material Viewer")
-        self.material_preview_button.setToolTip("Open the material/object viewer for the selected texture set.")
-        self.material_preview_button.clicked.connect(self.open_selected_material_renderer)
+
+        self.filters_button = QPushButton("Filters")
+        self.filters_button.setCheckable(True)
+        self.filters_button.toggled.connect(self._filters_toggled)
+
+        self.overflow_button = QToolButton()
+        self.overflow_button.setText("⋯")
+        self.overflow_button.setPopupMode(QToolButton.InstantPopup)
+        self.overflow_button.setToolTip("More actions")
+        overflow_menu = QMenu(self.overflow_button)
+        choose_root_action = QAction("Choose Root Folder...", self)
+        choose_root_action.triggered.connect(self.choose_root_folder)
+        cache_here_action = QAction("Cache Here", self)
+        cache_here_action.triggered.connect(self.cache_current_root)
+        export_csv_action = QAction("Export CSV", self)
+        export_csv_action.triggered.connect(self.export_tag_csv)
+        cancel_scan_action = QAction("Cancel Scan", self)
+        cancel_scan_action.triggered.connect(self.cancel_scan_from_ui)
+        self.theme_action = QAction("", self)
+        self.theme_action.triggered.connect(self.toggle_theme)
+        self._update_theme_action_text()
+        overflow_menu.addAction(choose_root_action)
+        overflow_menu.addAction(cache_here_action)
+        overflow_menu.addAction(export_csv_action)
+        overflow_menu.addAction(cancel_scan_action)
+        overflow_menu.addSeparator()
+        overflow_menu.addAction(self.theme_action)
+        self.overflow_button.setMenu(overflow_menu)
 
         self.grid = ThumbnailGrid()
         self.grid.itemActivated.connect(self.open_viewer)
@@ -378,9 +452,6 @@ class MainWindow(QMainWindow):
         self.grid.tagMaterialSetRequested.connect(self.add_tag_to_material_set)
         self.grid.removeTagRequested.connect(self.remove_tag_from_item)
 
-        size_bar = QHBoxLayout()
-        self.thumbnails_label = self._section_label("Thumbnails")
-        size_bar.addWidget(self.thumbnails_label)
         self.size_buttons = {}
         size_button_labels = {
             ThumbnailSize.TINY: "T",
@@ -392,117 +463,124 @@ class MainWindow(QMainWindow):
             button = QPushButton(size_button_labels[size])
             button.setCheckable(True)
             button.setToolTip(size.value)
-            button.setFixedWidth(scale_px(28, self))
+            button.setFixedSize(scale_px(28, self), scale_px(28, self))
             button.clicked.connect(lambda checked=False, chosen=size: self.set_thumbnail_size(chosen))
             self.size_buttons[size] = button
-            size_bar.addWidget(button)
+
+        top_bar = QFrame()
+        top_bar.setObjectName("topBar")
+        top_bar_layout = QHBoxLayout(top_bar)
+        bar_margin = scale_px(12, self)
+        top_bar_layout.setContentsMargins(bar_margin, scale_px(8, self), bar_margin, scale_px(8, self))
+        top_bar_layout.setSpacing(scale_px(10, self))
+        top_bar_layout.addWidget(self.breadcrumb_label, 1)
+        top_bar_layout.addWidget(self.search_box, 1)
+        top_bar_layout.addWidget(self.filters_button)
+        top_bar_layout.addWidget(self.overflow_button)
+        top_bar_layout.addSpacing(scale_px(8, self))
+        for size in ThumbnailSize:
+            top_bar_layout.addWidget(self.size_buttons[size])
+
         self.extension_filter_box = QLineEdit()
         self.extension_filter_box.setPlaceholderText(".fbx")
         self.extension_filter_box.setMaximumWidth(scale_px(120, self))
         self.extension_filter_box.textChanged.connect(self._schedule_search_filter)
-        size_bar.addSpacing(18)
         self.extension_label = self._section_label("Extension")
-        size_bar.addWidget(self.extension_label)
-        size_bar.addWidget(self.extension_filter_box)
         self.image_size_filter_box = QComboBox()
         self.image_size_filter_box.setMinimumWidth(scale_px(132, self))
         self.image_size_filter_box.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         for label, value in IMAGE_SIZE_FILTERS:
             self.image_size_filter_box.addItem(label, value)
         self.image_size_filter_box.currentIndexChanged.connect(self._image_size_filter_changed)
-        size_bar.addSpacing(18)
         self.image_size_label = self._section_label("Image size")
-        size_bar.addWidget(self.image_size_label)
-        size_bar.addWidget(self.image_size_filter_box)
         self.tag_filter_box = QComboBox()
         self.tag_filter_box.setMinimumWidth(scale_px(132, self))
         self.tag_filter_box.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         self.tag_filter_box.currentIndexChanged.connect(lambda _index: self._tag_filter_changed())
-        size_bar.addSpacing(18)
         self.tag_manager_button = self._section_button("Tag")
         self.tag_manager_button.clicked.connect(self.open_tag_manager)
-        size_bar.addWidget(self.tag_manager_button)
-        size_bar.addWidget(self.tag_filter_box)
         self.naming_convention_box = QLineEdit()
         self.naming_convention_box.setPlaceholderText("metallic, albedo, roughness, normal")
         self.naming_convention_box.setMinimumWidth(0)
         self.naming_convention_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.naming_convention_box.textChanged.connect(self.save_naming_convention)
         self.naming_convention_box.textChanged.connect(self._workflow_text_changed)
-        size_bar.addSpacing(18)
         self.naming_convention_label = self._section_label("Workflow")
         self.workflow_filter_checkbox = QCheckBox()
         self.workflow_filter_checkbox.setToolTip("Filter filenames by the current workflow terms.")
         self.workflow_filter_checkbox.toggled.connect(lambda _checked: self.apply_filter(self.search_box.text()))
-        size_bar.addWidget(self.naming_convention_label)
-        size_bar.addWidget(self.workflow_filter_checkbox)
-        size_bar.addWidget(self.naming_convention_box, 1)
         self.naming_presets_button = QPushButton("Presets")
         self.naming_presets_button.clicked.connect(self.open_naming_presets)
-        size_bar.addWidget(self.naming_presets_button)
-        size_bar.addStretch(1)
 
-        self.info_label = QLabel("Select an item to see file info.")
-        self.info_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.info_label.setWordWrap(True)
-        self.info_label.setStyleSheet(
-            "QLabel { color: #d7dde5; background: #2f343a; border: 1px solid #4a5058; padding: 6px 8px; }"
-        )
+        self.filter_row = QFrame()
+        self.filter_row.setObjectName("filterRow")
+        filter_layout = QHBoxLayout(self.filter_row)
+        filter_layout.setContentsMargins(bar_margin, scale_px(8, self), bar_margin, scale_px(8, self))
+        filter_layout.setSpacing(scale_px(10, self))
+        filter_layout.addWidget(self.extension_label)
+        filter_layout.addWidget(self.extension_filter_box)
+        filter_layout.addSpacing(18)
+        filter_layout.addWidget(self.image_size_label)
+        filter_layout.addWidget(self.image_size_filter_box)
+        filter_layout.addSpacing(18)
+        filter_layout.addWidget(self.tag_manager_button)
+        filter_layout.addWidget(self.tag_filter_box)
+        filter_layout.addSpacing(18)
+        filter_layout.addWidget(self.naming_convention_label)
+        filter_layout.addWidget(self.workflow_filter_checkbox)
+        filter_layout.addWidget(self.naming_convention_box, 1)
+        filter_layout.addWidget(self.naming_presets_button)
+        filter_layout.addSpacing(18)
+        filter_layout.addWidget(self.favorites_search_checkbox)
+        filter_layout.addWidget(self.sequence_grouping_checkbox)
+        filter_layout.addWidget(self.hide_duplicates_checkbox)
 
-        right_panel = QWidget()
-        right_panel.setMinimumWidth(scale_px(100, self))
-        right_layout = QVBoxLayout(right_panel)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-        search_row = QHBoxLayout()
-        search_row.addWidget(self.favorites_search_checkbox)
-        search_row.addWidget(self.sequence_grouping_checkbox)
-        search_row.addWidget(self.hide_duplicates_checkbox)
-        search_row.addWidget(self.search_box, 1)
-        search_row.addWidget(self.browse_path_button)
-        search_row.addWidget(self.seek_button)
-        search_row.addWidget(self.material_preview_button)
-        right_layout.addLayout(search_row)
-        right_layout.addLayout(size_bar)
-        right_layout.addWidget(self.info_label)
-        right_layout.addWidget(self.grid, 1)
+        self.inspector = InspectorPanel()
+        self.inspector.materialViewerRequested.connect(self.open_selected_material_renderer)
+        self.inspector.seekRequested.connect(self.seek_selected_item)
+        self.inspector.revealRequested.connect(self._reveal_focused_item)
+        self.inspector.validateRequested.connect(self._validate_focused_item)
+        self.inspector.addTagRequested.connect(self._tag_focused_item)
+        self.inspector.clear()
 
         splitter = QSplitter()
         splitter.addWidget(self.folder_browser)
-        splitter.addWidget(right_panel)
+        splitter.addWidget(self.grid)
+        splitter.addWidget(self.inspector)
         splitter.setChildrenCollapsible(False)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([scale_px(340, self), scale_px(1100, self)])
+        splitter.setSizes([scale_px(250, self), scale_px(890, self), scale_px(300, self)])
         self.folder_browser.setMinimumWidth(scale_px(100, self))
 
         container = QWidget()
         layout = QVBoxLayout(container)
-        margin = scale_px(8, self)
-        layout.setContentsMargins(margin, margin, margin, margin)
-        layout.addWidget(splitter)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(top_bar)
+        layout.addWidget(self.filter_row)
+        layout.addWidget(splitter, 1)
         self.setCentralWidget(container)
-
-        toolbar = QToolBar("Main")
-        toolbar.setMovable(False)
-        self.addToolBar(toolbar)
-        choose_root = QPushButton("Choose Root Folder")
-        choose_root.clicked.connect(self.choose_root_folder)
-        cancel_button = QPushButton("Cancel Scan")
-        cancel_button.clicked.connect(self.cancel_scan_from_ui)
-        cache_here_button = QPushButton("Cache Here")
-        cache_here_button.clicked.connect(self.cache_current_root)
-        self.export_tag_csv_button = QPushButton("Export CSV")
-        self.export_tag_csv_button.clicked.connect(self.export_tag_csv)
-        self.material_viewer_toolbar_button = QPushButton("Material Viewer")
-        self.material_viewer_toolbar_button.setToolTip("Open the material/object viewer for the selected texture set.")
-        self.material_viewer_toolbar_button.clicked.connect(self.open_selected_material_renderer)
-        toolbar.addWidget(choose_root)
-        toolbar.addWidget(cancel_button)
-        toolbar.addWidget(cache_here_button)
-        toolbar.addWidget(self.export_tag_csv_button)
-        toolbar.addWidget(self.material_viewer_toolbar_button)
 
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
+        self.cache_size_label = QLabel("")
+        self.cache_size_label.setContentsMargins(0, 0, scale_px(8, self), 0)
+        self.status_bar.addPermanentWidget(self.cache_size_label)
+        self._refresh_cache_size_label()
+
+        filters_visible = self.settings.load_filters_visible()
+        self.filters_button.setChecked(filters_visible)
+        self.filter_row.setVisible(filters_visible)
+        for signal in (
+            self.extension_filter_box.textChanged,
+            self.image_size_filter_box.currentIndexChanged,
+            self.tag_filter_box.currentIndexChanged,
+            self.workflow_filter_checkbox.toggled,
+            self.hide_duplicates_checkbox.toggled,
+            self.favorites_search_checkbox.toggled,
+        ):
+            signal.connect(lambda *_args: self._update_filters_button())
+        self._update_filters_button()
 
         self.favorites = self.settings.load()
         self.favorite_search_enabled = set(self.settings.load_favorites_search_enabled(self.favorites))
@@ -520,6 +598,7 @@ class MainWindow(QMainWindow):
         if last_root:
             self.current_root = last_root
             self.folder_browser.set_current_folder(last_root)
+            self._update_breadcrumb(last_root)
             self.refresh_tag_filter_options()
             self.status_bar.showMessage(f"Ready. Last folder: {last_root}")
 
@@ -571,23 +650,78 @@ class MainWindow(QMainWindow):
 
     def _section_label(self, text: str) -> QLabel:
         label = QLabel(text)
-        label.setStyleSheet("QLabel { color: #5ea7ff; font-weight: 600; }")
+        label.setProperty("variant", "kicker")
         return label
 
     def _section_button(self, text: str) -> QPushButton:
         button = QPushButton(text)
         button.setFlat(True)
         button.setCursor(Qt.PointingHandCursor)
-        button.setStyleSheet(
-            "QPushButton { color: #5ea7ff; font-weight: 600; border: none; background: transparent; padding: 0px; }"
-            "QPushButton:hover { color: #7bb8ff; }"
-        )
+        button.setProperty("variant", "link")
         return button
+
+    def _update_breadcrumb(self, path: Path | None) -> None:
+        if path is None:
+            self.breadcrumb_label.setText("")
+            return
+        parts = [part.rstrip("\\/") or part for part in path.parts]
+        if len(parts) > 6:
+            parts = parts[:2] + ["…"] + parts[-3:]
+        escaped = [
+            part.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            for part in parts
+        ]
+        if escaped:
+            escaped[-1] = f"<b>{escaped[-1]}</b>"
+        self.breadcrumb_label.setText(" › ".join(escaped))
+        self.breadcrumb_label.setToolTip(str(path))
+
+    def _filters_toggled(self, checked: bool) -> None:
+        self.filter_row.setVisible(checked)
+        self.settings.save_filters_visible(checked)
+
+    def _active_filter_count(self) -> int:
+        count = 0
+        if self.extension_filter_box.text().strip():
+            count += 1
+        if self.image_size_filter_box.currentData() is not None:
+            count += 1
+        if self._active_tag_name() is not None:
+            count += 1
+        if self.workflow_filter_checkbox.isChecked():
+            count += 1
+        if self.hide_duplicates_checkbox.isChecked():
+            count += 1
+        if self.favorites_search_checkbox.isChecked():
+            count += 1
+        return count
+
+    def _update_filters_button(self) -> None:
+        count = self._active_filter_count()
+        self.filters_button.setText(f"Filters · {count}" if count else "Filters")
+
+    def toggle_theme(self) -> None:
+        mode = "light" if self.settings.load_theme_mode() == "dark" else "dark"
+        self.settings.save_theme_mode(mode)
+        apply_theme(QApplication.instance(), mode)
+        self._update_theme_action_text()
+
+    def _update_theme_action_text(self) -> None:
+        mode = self.settings.load_theme_mode()
+        self.theme_action.setText("Light Mode" if mode == "dark" else "Dark Mode")
+
+    def _refresh_cache_size_label(self) -> None:
+        worker = CacheSizeWorker()
+        worker.signals.finished.connect(
+            lambda text: self.cache_size_label.setText(f"Cache: {text}" if text else "")
+        )
+        self.index_pool.start(worker)
 
     def select_folder(self, path: Path) -> None:
         if not path.exists():
             return
 
+        self._update_breadcrumb(path)
         if is_drive_root(path):
             self.current_root = path
             self._queued_folder = None
@@ -803,6 +937,7 @@ class MainWindow(QMainWindow):
         self.current_cache = None
         self.status_bar.showMessage(f"Cached thumbnails for {cached_count} item(s).")
         self.request_visible_thumbnails()
+        self._refresh_cache_size_label()
 
     def _cache_failed(self, message: str) -> None:
         self.current_cache = None
@@ -1597,36 +1732,113 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage(f"Seeked to {item.display_name}.")
 
     def update_selected_info(self) -> None:
-        current = self.grid.currentItem()
-        if current is None or current.isHidden():
-            self.info_label.setText("Select an item to see file info.")
+        if self._focused_media_item() is None:
+            self._inspector_timer.stop()
+            self._inspector_item_key = None
+            self.inspector.clear()
             return
+        self._inspector_timer.start()
 
-        item = current.data(Qt.UserRole)
+    def _refresh_inspector(self) -> None:
+        item = self._focused_media_item()
         if item is None:
-            self.info_label.setText("Select an item to see file info.")
+            self._inspector_item_key = None
+            self.inspector.clear()
             return
 
-        info_parts = [format_type_label(item)]
+        self._inspector_item_key = (item.preview_path, item.display_name)
         path = item.preview_path
 
+        meta: list[tuple[str, str]] = [("Type", format_type_label(item))]
         dimensions = self._image_dimensions_label(path)
         if dimensions:
-            info_parts.append(dimensions)
-
+            meta.append(("Dimensions", dimensions))
         if item.sequence:
-            frame_count = len(item.sequence.frame_paths)
-            info_parts.append(f"{frame_count} frames")
-
+            meta.append(("Frames", str(len(item.sequence.frame_paths))))
         file_size = self._file_size_label(path)
         if file_size:
-            info_parts.append(file_size)
-
+            meta.append(("File size", file_size))
         modified = self._modified_label(path)
         if modified:
-            info_parts.append(modified)
+            meta.append(("Modified", modified))
+        meta.append(("Folder", str(item.folder)))
 
-        self.info_label.setText(f"{item.display_name}    " + "    |    ".join(info_parts))
+        self.inspector.set_item(
+            item.display_name,
+            None,
+            meta,
+            self._tags_for_item(item),
+            self._texture_set_rows(item),
+        )
+        self.inspector.material_button.setEnabled(not item.is_video and not item.is_model)
+        self._request_inspector_preview(item)
+
+    def _tags_for_item(self, item) -> list[str]:
+        root = self._tag_root_for_item(item, create=False)
+        if root is None:
+            return []
+        try:
+            return TagStore(root).tags_for_items([item])
+        except OSError:
+            return []
+
+    def _texture_set_rows(self, item) -> list[tuple[str, str, bool]]:
+        if item.is_video or item.is_model:
+            return []
+        roles = texture_set_for_item(item, self.items).roles
+        rows: list[tuple[str, str, bool]] = []
+        for label, role_keys in (
+            ("Basecolor", ("basecolor",)),
+            ("Normal", ("normal",)),
+            ("Roughness", ("roughness", "gloss", "packed")),
+            ("Metallic", ("metallic", "packed")),
+            ("AO", ("ao", "packed")),
+            ("Height", ("height",)),
+        ):
+            present = any(role in roles for role in role_keys)
+            rows.append((label, "OK" if present else "MISSING", present))
+        return rows
+
+    def _request_inspector_preview(self, item) -> None:
+        size = scale_px(THUMBNAIL_DIMENSIONS[ThumbnailSize.LARGE], self)
+        worker = ThumbnailWorker(item, size, self._thumbnail_generation)
+        worker.signals.ready.connect(self._inspector_thumbnail_ready)
+        self.thumbnail_pool.start(worker)
+
+    def _inspector_thumbnail_ready(self, _generation: int, path_key: str, _size: int, image) -> None:
+        if self._inspector_item_key is None or str(self._inspector_item_key[0]) != path_key:
+            return
+        pixmap = QPixmap.fromImage(image) if not isinstance(image, QPixmap) else image
+        if pixmap.isNull():
+            return
+        self.inspector.preview.setPixmap(
+            pixmap.scaled(self.inspector.preview.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        )
+
+    def _reveal_focused_item(self) -> None:
+        item = self._focused_media_item()
+        if item is None:
+            self.status_bar.showMessage("Select an item to reveal.")
+            return
+        reveal_in_file_manager(item.preview_path)
+
+    def _validate_focused_item(self) -> None:
+        item = self._focused_media_item()
+        if item is None:
+            self.status_bar.showMessage("Select an item to validate.")
+            return
+        if item.is_video or item.is_model:
+            self.status_bar.showMessage("Validation works on image textures.")
+            return
+        self.open_texture_validation(item)
+
+    def _tag_focused_item(self) -> None:
+        item = self._focused_media_item()
+        if item is None:
+            self.status_bar.showMessage("Select an item to tag.")
+            return
+        self.add_tag_to_file(item)
+        self._inspector_timer.start()
 
     def _image_dimensions_for_item(self, item) -> tuple[int, int] | None:
         return media_dimensions(item.preview_path, item.metadata)
@@ -2277,6 +2489,7 @@ def run() -> None:
     icon = app_icon()
     app.setWindowIcon(icon)
     app.setStyle("Fusion")
+    apply_theme(app, FavoritesStore().load_theme_mode())
 
     startup_screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
     startup_splash = create_splash("Loading Texture Browser...", startup_screen)

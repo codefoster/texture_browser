@@ -19,7 +19,7 @@ class TextureSetValidationDialog(QDialog):
         self.resize(scale_px(720, self), scale_px(560, self))
 
         title = QLabel(f"{texture_set.title}    {len(texture_set.items)} file(s)")
-        title.setStyleSheet("QLabel { color: #f2f5f8; font-weight: 600; }")
+        title.setStyleSheet("font-weight: 700;")
 
         report = QTextEdit()
         report.setReadOnly(True)

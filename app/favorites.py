@@ -91,6 +91,19 @@ class FavoritesStore:
     def save_active_tag_filter(self, value: str) -> None:
         self.settings.setValue("active_tag_filter", value.strip())
 
+    def load_theme_mode(self) -> str:
+        value = self.settings.value("ui/theme", "dark", str)
+        return value if value in {"dark", "light"} else "dark"
+
+    def save_theme_mode(self, value: str) -> None:
+        self.settings.setValue("ui/theme", value)
+
+    def load_filters_visible(self) -> bool:
+        return self.settings.value("ui/filters_visible", False, bool)
+
+    def save_filters_visible(self, value: bool) -> None:
+        self.settings.setValue("ui/filters_visible", bool(value))
+
     def load_naming_presets(self) -> dict[str, str]:
         value = self.settings.value("naming_presets", "{}", str)
         try:
